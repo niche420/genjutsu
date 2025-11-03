@@ -1,0 +1,33 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/gj-core",
+    "crates/gj-app",
+    "crates/gj-lgm",
+    "crates/gj-splat"
+]
+
+[workspace.package]
+edition = "2024"
+version = "0.1.0"
+readme = "README.md"
+license = "Apache-2.0"
+repository = "https://github.com/swaggimus-grime/genjutsu"
+keywords = ["diffusion", "splat"]
+
+[workspace.dependencies]
+burn = { version = "0.19.0", features = [] }
+burn-ndarray = "0.19.0"
+bytemuck = "1.24.0"
+burn-wgpu = "0.19.0"
+env_logger = "0.11.8"
+egui = "0.33.0"
+egui-wgpu = "0.33.0"
+egui-winit = "0.33.0"
+glam = "0.30.9"
+image = "0.25.8"
+log = "0.4.28"
+serde = { version = "1.0.228", features = ["derive"]}
+thiserror = "2.0.17"
+wgpu = { version = "27.0.1", features = ["serde"] }
+winit = "0.30.12"

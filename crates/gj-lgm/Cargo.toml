@@ -1,0 +1,14 @@
+[package]
+name = "gj-lgm"
+edition.workspace = true
+version.workspace = true
+readme.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+
+[dependencies]
+gj-core.path = "../gj-core"
+burn.workspace = true
+burn-ndarray.workspace = true
+image.workspace = true

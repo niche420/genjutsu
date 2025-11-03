@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<module type="EMPTY_MODULE" version="4">
+  <component name="NewModuleRootManager">
+    <content url="file://$MODULE_DIR$">
+      <sourceFolder url="file://$MODULE_DIR$/crates/app/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/diffusion/examples" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/diffusion/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/gj-core/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/gj-lgm/examples" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/gj-lgm/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/gj-splat/examples" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/gj-splat/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/gj-app/src" isTestSource="false" />
+      <excludeFolder url="file://$MODULE_DIR$/crates/app/target" />
+      <excludeFolder url="file://$MODULE_DIR$/crates/diffusion/target" />
+      <excludeFolder url="file://$MODULE_DIR$/target" />
+      <excludeFolder url="file://$MODULE_DIR$/crates/gj-splat/target" />
+    </content>
+    <orderEntry type="inheritedJdk" />
+    <orderEntry type="sourceFolder" forTests="false" />
+  </component>
+</module>

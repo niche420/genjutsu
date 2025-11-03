@@ -1,0 +1,11 @@
+[package]
+name = "gj-core"
+edition.workspace = true
+version.workspace = true
+readme.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+
+[dependencies]
+thiserror.workspace = true
