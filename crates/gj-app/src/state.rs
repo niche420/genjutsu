@@ -1,4 +1,5 @@
 use burn_ndarray::NdArray;
+use burn_wgpu::Wgpu;
 use egui_wgpu::wgpu;
 use winit::window::Window;
 use gj_core::gaussian_cloud::GaussianCloud;
@@ -20,7 +21,7 @@ pub struct AppState<'wnd> {
     depth_view: wgpu::TextureView,
 
     // LGM
-    pub lgm_pipeline: LGMPipeline<NdArray>,
+    pub lgm_pipeline: LGMPipeline<Wgpu>,
 
     // UI State
     pub prompt: String,

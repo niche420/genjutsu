@@ -84,7 +84,7 @@ pub fn preprocess_images<B: Backend>(
     }
 
     // Create tensor [1, 4, 9, 256, 256]
-    let tensor = Tensor::<B, 5>::from_floats(all_data.as_slice(), device)
+    let tensor = Tensor::<B, 1>::from_floats(all_data.as_slice(), device)
         .reshape([1, 4, 9, 256, 256]);
 
     Ok(tensor)

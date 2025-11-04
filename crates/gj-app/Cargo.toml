@@ -12,6 +12,7 @@ gj-core.path = "../gj-core"
 gj-lgm.path = "../gj-lgm"
 gj-splat.path = "../gj-splat"
 burn-ndarray.workspace = true
+burn-wgpu.workspace = true
 env_logger.workspace = true
 egui.workspace = true
 egui-winit.workspace = true
