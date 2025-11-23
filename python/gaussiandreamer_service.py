@@ -208,7 +208,7 @@ def generate():
 
         return jsonify({
             "status": "success",
-            "output_path": os.path.join("python", output_path),
+            "output_path": output_path,
             "prompt": prompt
         })
     except Exception as e:
@@ -229,7 +229,7 @@ def main():
     parser = argparse.ArgumentParser(description="GaussianDreamer Service")
     parser.add_argument('--host', default='127.0.0.1', help='Host to bind to')
     parser.add_argument('--port', type=int, default=5000, help='Port to bind to')
-    parser.add_argument('--output-dir', default='./outputs', help='Output directory for .ply files')
+    parser.add_argument('--output-dir', default='../outputs', help='Output directory for .ply files')
 
     args = parser.parse_args()
 

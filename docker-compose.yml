@@ -1,0 +1,35 @@
+version: '3.8'
+
+services:
+  gaussiandreamer:
+    build:
+      context: ./python
+      dockerfile: Dockerfile
+    container_name: gaussiandreamer-service
+    ports:
+      - "5000:5000"
+    volumes:
+      # Mount root-level outputs directory
+      - ./outputs:/app/outputs
+      # Cache Hugging Face models (optional but recommended)
+      - huggingface-cache:/root/.cache/huggingface
+    environment:
+      - CUDA_VISIBLE_DEVICES=0
+    command: ["python", "gaussiandreamer_service.py", "--host", "0.0.0.0", "--port", "5000", "--output-dir", "/app/outputs"]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+volumes:
+  huggingface-cache:

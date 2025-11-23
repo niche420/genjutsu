@@ -1,3 +1,5 @@
+// crates/gj-lgm/src/text_to_image.rs
+
 use gj_core::error::{Error, Result};
 use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
@@ -73,8 +75,35 @@ pub fn generate_gaussians_from_prompt(
             let output_path = result.output_path
                 .ok_or_else(|| Error::InvalidConfig("No output path returned".to_string()))?;
 
-            println!("✓ GaussianDreamer generated: {}", output_path);
-            Ok(PathBuf::from(output_path))
+            // Convert service path to host path relative to project root
+            let host_path = if output_path.starts_with("/app/outputs/") {
+                // Docker: /app/outputs/file.ply -> outputs/file.ply
+                PathBuf::from(output_path.replace("/app/outputs/", "outputs/"))
+            } else if output_path.starts_with("../outputs/") {
+                // Local: ../outputs/file.ply -> outputs/file.ply
+                PathBuf::from(output_path.replace("../outputs/", "outputs/"))
+            } else if output_path.starts_with("outputs/") {
+                // Already correct
+                PathBuf::from(output_path.clone())
+            } else {
+                // Unknown format - try to extract just the filename
+                let filename = std::path::Path::new(&output_path)
+                    .file_name()
+                    .ok_or_else(|| Error::InvalidConfig("Invalid output path".to_string()))?;
+                PathBuf::from("outputs").join(filename)
+            };
+
+            println!("✓ GaussianDreamer generated: {}", host_path.display());
+
+            // Verify the file exists
+            if !host_path.exists() {
+                return Err(Error::InvalidConfig(
+                    format!("Generated file not found at: {}. Original path was: {}",
+                            host_path.display(), output_path)
+                ));
+            }
+
+            Ok(host_path)
         }
         "error" => {
             let error_msg = result.error.unwrap_or_else(|| "Unknown error".to_string());
