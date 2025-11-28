@@ -1,2 +1,4 @@
 /target
 /outputs
+/python/models/__pycache__/
+/python/repositories/__pycache__/__init__.cpython-313.pyc
