@@ -1,0 +1,77 @@
+version: '3.8'
+
+services:
+  # Redis - Message broker and result backend
+  redis:
+    image: redis:7-alpine
+    container_name: genjutsu-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - ./redis/redis.conf:/usr/local/etc/redis/redis.conf
+      - redis-data:/data
+    command: redis-server /usr/local/etc/redis/redis.conf
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  # FastAPI - REST API for job submission and status
+  api:
+    build:
+      context: ./api
+      dockerfile: Dockerfile
+    container_name: genjutsu-api
+    ports:
+      - "5000:5000"
+    volumes:
+      - ../outputs:/app/outputs
+      - ./shared:/app/shared
+      - ./models:/app/models
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+      - OUTPUT_DIR=/app/outputs
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # Celery Worker - GPU-accelerated 3D generation
+  worker:
+    build:
+      context: ./worker
+      dockerfile: Dockerfile
+    container_name: genjutsu-worker
+    volumes:
+      - ../outputs:/app/outputs
+      - ./shared:/app/shared
+      - ./models:/app/models
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+      - OUTPUT_DIR=/app/outputs
+      - CUDA_VISIBLE_DEVICES=0
+    depends_on:
+      redis:
+        condition: service_healthy
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: unless-stopped
+
+volumes:
+  redis-data:

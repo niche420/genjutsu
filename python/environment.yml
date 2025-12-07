@@ -20,14 +20,18 @@ dependencies:
   - pillow>=10.2.0
   - scipy>=1.12.0
 
-  # Web service
-  - flask=3.0.0
-
   # Utilities
   - pip=24.0
 
   # Pip dependencies
   - pip:
+      # FastAPI + Celery stack
+      - fastapi==0.115.5
+      - uvicorn[standard]==0.34.0
+      - pydantic==2.10.3
+      - celery==5.4.0
+      - redis==5.2.1
+
       # Shap-E
       - git+https://github.com/openai/shap-e.git
 
@@ -36,9 +40,8 @@ dependencies:
       - accelerate>=0.26.0
       - diffusers>=0.26.0
       - trimesh>=4.0.0
-      - pillow>=10.0.0
       - matplotlib>=3.8.0
       - tqdm>=4.66.0
-
-      # For PLY export
       - plyfile>=1.0.0
+      - ipywidgets>=8.0.0
+      - ipython>=8.0.0

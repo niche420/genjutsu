@@ -13,7 +13,7 @@ use gj_splat::renderer::GaussianRenderer;
 
 use crate::events::{AppEvent, UiEvent};
 use crate::gfx::GfxState;
-use crate::worker::{LGMWorker, WorkerResponse};
+use crate::worker::{InferenceWorker, WorkerResponse};
 use crate::ui::UiState;
 use crate::worker;
 
@@ -32,7 +32,7 @@ pub struct AppState {
     pub prompt: String,
     pub status: String,
 
-    pub lgm_worker: LGMWorker,
+    pub lgm_worker: InferenceWorker,
 
     // Mouse state
     pub mouse_pressed: bool,
@@ -57,7 +57,7 @@ impl AppState {
         let size = window.inner_size();
         camera.aspect_ratio = size.width as f32 / size.height as f32;
         
-        let lgm_worker = LGMWorker::new();
+        let lgm_worker = InferenceWorker::new();
 
         let rt = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(4)
@@ -160,13 +160,14 @@ impl AppState {
                     self.ui.push_app_event(AppEvent::Status(self.status.clone()));
                     self.ui.push_app_event(AppEvent::Log(format!("Pipeline error: {}", err)));
                 }
-                WorkerResponse::Progress(p) => {
+                WorkerResponse::Progress(p, ..) => {
                     self.ui.push_app_event(AppEvent::Progress(p));
                 }
                 WorkerResponse::Status(s) => {
                     self.status = s.clone();
                     self.ui.push_app_event(AppEvent::Status(s));
-                }
+                },
+                WorkerResponse::JobSubmitted(jobId) => self.ui.push_app_event(AppEvent::Status(jobId))
             }
         }
 
