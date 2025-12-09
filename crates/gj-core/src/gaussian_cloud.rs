@@ -117,9 +117,6 @@ impl GaussianCloud {
 
         let mut cloud = Self::with_capacity(vertex_count);
 
-        // Each vertex: 3 pos + 3 normal + 3 color + 1 opacity + 3 scale + 4 rotation = 17 values
-        // Sizes: 3*4 + 3*4 + 3*1 + 1*4 + 3*4 + 4*4 = 12 + 12 + 3 + 4 + 12 + 16 = 59 bytes
-
         for i in 0..vertex_count {
             let offset = i * 59;
             if offset + 59 > data.len() {
@@ -128,29 +125,33 @@ impl GaussianCloud {
 
             let vertex_data = &data[offset..offset + 59];
 
-            // Parse binary data
+            // Position (bytes 0-11)
             let position = [
                 f32::from_le_bytes([vertex_data[0], vertex_data[1], vertex_data[2], vertex_data[3]]),
                 f32::from_le_bytes([vertex_data[4], vertex_data[5], vertex_data[6], vertex_data[7]]),
                 f32::from_le_bytes([vertex_data[8], vertex_data[9], vertex_data[10], vertex_data[11]]),
             ];
 
-            // Skip normals (12 bytes)
+            // Skip normals (bytes 12-23) - 3 floats
 
+            // Color (bytes 24-26) - 3 unsigned bytes
             let color = [
                 vertex_data[24] as f32 / 255.0,
                 vertex_data[25] as f32 / 255.0,
                 vertex_data[26] as f32 / 255.0,
             ];
 
+            // Opacity (bytes 27-30)
             let opacity = f32::from_le_bytes([vertex_data[27], vertex_data[28], vertex_data[29], vertex_data[30]]);
 
+            // Scale (bytes 31-42)
             let scale = [
                 f32::from_le_bytes([vertex_data[31], vertex_data[32], vertex_data[33], vertex_data[34]]),
                 f32::from_le_bytes([vertex_data[35], vertex_data[36], vertex_data[37], vertex_data[38]]),
                 f32::from_le_bytes([vertex_data[39], vertex_data[40], vertex_data[41], vertex_data[42]]),
             ];
 
+            // Rotation (bytes 43-58)
             let rotation = [
                 f32::from_le_bytes([vertex_data[43], vertex_data[44], vertex_data[45], vertex_data[46]]),
                 f32::from_le_bytes([vertex_data[47], vertex_data[48], vertex_data[49], vertex_data[50]]),

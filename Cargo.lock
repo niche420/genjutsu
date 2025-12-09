@@ -3352,7 +3352,6 @@ dependencies = [
  "egui-winit",
  "env_logger",
  "gj-core",
- "gj-lgm",
  "gj-splat",
  "image",
  "log",
@@ -3369,18 +3368,6 @@ name = "gj-core"
 version = "0.1.0"
 dependencies = [
  "thiserror 2.0.17",
-]
-
-[[package]]
-name = "gj-lgm"
-version = "0.1.0"
-dependencies = [
- "burn",
- "burn-ndarray",
- "gj-core",
- "image",
- "reqwest",
- "serde",
 ]
 
 [[package]]

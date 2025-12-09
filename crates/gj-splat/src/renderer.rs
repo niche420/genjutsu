@@ -231,15 +231,15 @@ impl GaussianRenderer {
     }
 
     pub fn load_gaussians(&mut self, cloud: &GaussianCloud) {
-        // Balanced filtering - aim for 20-50k splats
         let instances: Vec<GaussianInstance> = (0..cloud.count)
             .filter(|&i| {
                 let opacity = cloud.opacity[i];
                 let scale_avg = (cloud.scales[i][0] + cloud.scales[i][1] + cloud.scales[i][2]) / 3.0;
 
-                // Keep moderately visible splats
-                opacity > 0.1 && // More reasonable threshold
-                    scale_avg > 0.001 && // Skip tiny splats
+                // Keep more splats - only filter out garbage
+                opacity > 0.01 &&
+                    scale_avg > 0.0001 &&
+                    scale_avg < 10.0 &&
                     cloud.positions[i][0].is_finite() &&
                     cloud.positions[i][1].is_finite() &&
                     cloud.positions[i][2].is_finite()
@@ -247,13 +247,9 @@ impl GaussianRenderer {
             .map(|i| GaussianInstance {
                 position: cloud.positions[i],
                 _padding1: 0.0,
-                color: cloud.colors[i],
-                opacity: (cloud.opacity[i] * 0.4).min(1.0),
-                scale: [
-                    (cloud.scales[i][0] * 0.5).max(0.002),
-                    (cloud.scales[i][1] * 0.5).max(0.002),
-                    (cloud.scales[i][2] * 0.5).max(0.002),
-                ],
+                color: cloud.colors[i],  // USE ACTUAL COLORS
+                opacity: cloud.opacity[i],  // DON'T multiply by 0.4!
+                scale: cloud.scales[i],  // DON'T multiply by 0.5!
                 _padding2: 0.0,
                 rotation: cloud.rotations[i],
             })

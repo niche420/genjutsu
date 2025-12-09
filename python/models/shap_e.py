@@ -66,7 +66,7 @@ class ShapEModel(Model3DBase):
         print(f"  Inference steps: {num_inference_steps}")
 
         # Generate latents
-        print("  [1/2] Generating latent representation...")
+        print("  [1/3] Generating latent representation...")
         latents = self.sample_latents(
             batch_size=1,
             model=self.text_model,
@@ -83,14 +83,31 @@ class ShapEModel(Model3DBase):
             s_churn=0,
         )
 
-        # Decode to mesh/point cloud
-        print("  [2/2] Decoding to 3D representation...")
+        print("  [2/3] Decoding to mesh...")
 
-        # Extract point cloud with colors from latent
-        pc = self.decode_latent_mesh(self.diffusion_model, latents[0]).tri_mesh()
+        # Get the mesh with higher resolution
+        from shap_e.util.notebooks import decode_latent_mesh
 
-        # Convert to Gaussian splats
-        self._export_to_ply(pc, output_path)
+        # Try different resolutions to get better quality
+        try:
+            # High resolution (slower but better)
+            mesh = decode_latent_mesh(self.diffusion_model, latents[0]).tri_mesh()
+            print(f"    ✓ Generated mesh with {len(mesh.verts)} vertices")
+        except Exception as e:
+            print(f"    ✗ Failed to decode mesh: {e}")
+            raise
+
+        # Check if mesh is degenerate
+        vertices = mesh.verts
+        bounds = vertices.max(axis=0) - vertices.min(axis=0)
+        print(f"    Mesh bounds: X={bounds[0]:.3f}, Y={bounds[1]:.3f}, Z={bounds[2]:.3f}")
+
+        if bounds.min() < 0.01:
+            print(f"    ⚠️  Warning: Mesh appears flat/degenerate!")
+            print(f"    Consider using a different prompt or higher guidance scale")
+
+        print("  [3/3] Converting to Gaussian splats...")
+        self._export_to_ply(mesh, output_path)
 
         print(f"  ✓ Saved to {output_path}")
         return output_path
@@ -104,69 +121,123 @@ class ShapEModel(Model3DBase):
         return 30 + (num_steps * 0.5)  # ~30-60 seconds
 
     def _export_to_ply(self, mesh, output_path):
-        """Convert Shap-E mesh to PLY format with Gaussian splat data"""
-        import trimesh
+        """Convert Shap-E mesh to PLY with proper Gaussian splat data"""
+        import numpy as np
+        from scipy.spatial import cKDTree
 
-        # Get vertices and colors
         vertices = mesh.verts
-        colors = mesh.vertex_channels.get('color', np.ones_like(vertices))
-
-        # Convert colors from [0,1] to [0,255]
-        if colors.max() <= 1.0:
-            colors = (colors * 255).astype(np.uint8)
-
         num_points = len(vertices)
 
-        # Create Gaussian parameters
-        # Each point becomes a small Gaussian splat
-        scales = np.ones((num_points, 3), dtype=np.float32) * 0.05  # Small scale
+        if num_points == 0:
+            raise ValueError("Mesh has no vertices!")
+
+        print(f"  Converting {num_points} vertices to Gaussian splats...")
+
+        # === COLORS ===
+        if 'R' in mesh.vertex_channels and 'G' in mesh.vertex_channels and 'B' in mesh.vertex_channels:
+            R = mesh.vertex_channels['R']
+            G = mesh.vertex_channels['G']
+            B = mesh.vertex_channels['B']
+            colors = np.stack([R, G, B], axis=-1)
+            print(f"    ✓ Using separate R, G, B channels")
+        elif 'color' in mesh.vertex_channels:
+            colors = mesh.vertex_channels['color']
+            print(f"    ✓ Using 'color' channel")
+        else:
+            print(f"    ✗ No color channels, using normals")
+            if hasattr(mesh, 'vertex_normals') and mesh.vertex_normals is not None:
+                normals = mesh.vertex_normals
+                colors = (normals + 1.0) / 2.0
+            else:
+                colors = np.random.rand(num_points, 3) * 0.5 + 0.5  # Random colors
+
+        colors = np.clip(colors, 0.0, 1.0)
+        colors_uint8 = (colors * 255).astype(np.uint8)
+
+        print(f"    Color range: [{colors.min():.3f}, {colors.max():.3f}]")
+        print(f"    First 3 colors: {colors[:3]}")
+
+        # === SCALES ===
+        print(f"    Computing scales...")
+        tree = cKDTree(vertices)
+        k = min(8, num_points)
+        distances, _ = tree.query(vertices, k=k)
+        avg_distances = distances[:, 1:].mean(axis=1)
+
+        scales = np.zeros((num_points, 3), dtype=np.float32)
+        scales[:, 0] = avg_distances * 0.5
+        scales[:, 1] = avg_distances * 0.5
+        scales[:, 2] = avg_distances * 0.4
+        scales = np.clip(scales, 0.005, 0.2)
+
+        print(f"    Scale range: [{scales.min():.4f}, {scales.max():.4f}]")
+
+        # === ROTATIONS ===
         rotations = np.zeros((num_points, 4), dtype=np.float32)
         rotations[:, 0] = 1.0  # Identity quaternion (w=1, x=0, y=0, z=0)
-        opacities = np.ones(num_points, dtype=np.float32) * 0.8
 
-        # Write PLY file
+        # === OPACITY ===
+        opacities = np.ones(num_points, dtype=np.float32) * 0.95
+
+        # === WRITE PLY (CAREFULLY) ===
+        print(f"    Writing PLY to {output_path}...")
+
+        # Use struct to ensure correct binary layout
+        import struct
+
         with open(output_path, 'wb') as f:
-            # Header
-            header = f"""ply
-format binary_little_endian 1.0
-element vertex {num_points}
-property float x
-property float y
-property float z
-property float nx
-property float ny
-property float nz
-property uchar red
-property uchar green
-property uchar blue
-property float opacity
-property float scale_0
-property float scale_1
-property float scale_2
-property float rot_0
-property float rot_1
-property float rot_2
-property float rot_3
-end_header
-"""
+            # ASCII header
+            header = (
+                "ply\n"
+                "format binary_little_endian 1.0\n"
+                f"element vertex {num_points}\n"
+                "property float x\n"
+                "property float y\n"
+                "property float z\n"
+                "property float nx\n"
+                "property float ny\n"
+                "property float nz\n"
+                "property uchar red\n"
+                "property uchar green\n"
+                "property uchar blue\n"
+                "property float opacity\n"
+                "property float scale_0\n"
+                "property float scale_1\n"
+                "property float scale_2\n"
+                "property float rot_0\n"
+                "property float rot_1\n"
+                "property float rot_2\n"
+                "property float rot_3\n"
+                "end_header\n"
+            )
             f.write(header.encode('ascii'))
 
-            # Data
+            # Binary data - write each vertex
             for i in range(num_points):
-                # Position
-                f.write(vertices[i].astype(np.float32).tobytes())
+                # Position (3 floats)
+                f.write(struct.pack('fff', vertices[i][0], vertices[i][1], vertices[i][2]))
 
-                # Normal (placeholder)
-                f.write(np.zeros(3, dtype=np.float32).tobytes())
+                # Normal (3 floats - placeholder)
+                f.write(struct.pack('fff', 0.0, 0.0, 0.0))
 
-                # Color (RGB as uint8)
-                f.write(colors[i].astype(np.uint8).tobytes())
+                # Color (3 uint8)
+                f.write(struct.pack('BBB', colors_uint8[i][0], colors_uint8[i][1], colors_uint8[i][2]))
 
-                # Opacity
-                f.write(opacities[i].astype(np.float32).tobytes())
+                # Opacity (1 float)
+                f.write(struct.pack('f', opacities[i]))
 
-                # Scale
-                f.write(scales[i].astype(np.float32).tobytes())
+                # Scale (3 floats)
+                f.write(struct.pack('fff', scales[i][0], scales[i][1], scales[i][2]))
 
-                # Rotation (quaternion)
-                f.write(rotations[i].astype(np.float32).tobytes())
+                # Rotation (4 floats)
+                f.write(struct.pack('ffff', rotations[i][0], rotations[i][1], rotations[i][2], rotations[i][3]))
+
+        print(f"    ✓ Successfully wrote {num_points} splats")
+
+        # Verify file was written
+        file_size = output_path.stat().st_size
+        expected_size = len(header.encode('ascii')) + (num_points * 59)
+        print(f"    File size: {file_size} bytes (expected: {expected_size})")
+
+        if file_size != expected_size:
+            raise ValueError(f"PLY file size mismatch! Got {file_size}, expected {expected_size}")

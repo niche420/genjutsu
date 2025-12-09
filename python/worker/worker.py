@@ -102,12 +102,24 @@ def generate_3d(self, prompt: str, model_name: str, guidance_scale: float, num_i
         progress_callback(0.1, 'Initializing model...')
 
         # Generate
-        result_path = model.generate(
-            prompt,
-            output_path,
-            guidance_scale=guidance_scale,
-            num_inference_steps=num_inference_steps
-        )
+        try:
+            result_path = model.generate(
+                prompt,
+                output_path,
+                guidance_scale=guidance_scale,
+                num_inference_steps=num_inference_steps
+            )
+        except ValueError as e:
+            # Generation failed - return helpful error
+            error_msg = str(e)
+            if "flat" in error_msg.lower() or "degenerate" in error_msg.lower():
+                raise ValueError(
+                    f"Generated mesh is flat/invalid. Try:\n"
+                    f"  • More specific prompt (add details about shape/structure)\n"
+                    f"  • Higher guidance scale (try 20-25)\n"
+                    f"  • Different prompt entirely"
+                )
+            raise
 
         progress_callback(1.0, 'Complete!')
 

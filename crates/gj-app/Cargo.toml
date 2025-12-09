@@ -9,7 +9,6 @@ keywords.workspace = true
 
 [dependencies]
 gj-core.path = "../gj-core"
-gj-lgm.path = "../gj-lgm"
 gj-splat.path = "../gj-splat"
 anyhow.workspace = true
 burn.workspace = true
