@@ -1,28 +1,75 @@
-mod panels;
+mod top_panel;
+mod side_panel;
+mod central_panel;
+mod queue_panel;
+
+pub use top_panel::TopPanel;
+pub use side_panel::SidePanel;
+pub use central_panel::CentralPanel;
+pub use queue_panel::QueuePanel;
 
 use std::sync::Arc;
-use egui::{Context, FullOutput};
+use async_trait::async_trait;
+use egui::Context;
+use surrealdb_types::RecordId;
+use winit::event_loop::EventLoopProxy;
 use winit::window::Window;
-use crate::events::{AppEvent, UiEvent};
+use gj_core::Model3D;
+use crate::generator::db::job::JobRecord;
+use crate::events::{AppEvent, GjEvent};
 use crate::gfx::GfxState;
-use crate::ui::panels::Panels;
+
+#[derive(Debug, Clone)]
+pub enum UiEvent {
+    ResetCamera,
+    LoadImages,
+    GenerateWithModel {
+        prompt: String,
+        model: Model3D,
+    },
+    PromptChanged(String),
+    ToggleWireframe(bool),
+    Log(String),
+
+    // Jobs
+    LoadScene(RecordId),
+    RemoveJob(RecordId),
+    ClearCompletedJobs,
+}
+
+pub struct UiContext {
+    pub jobs: Vec<JobRecord>,
+    pub current_job_id: Option<RecordId>,
+    pub event_loop_proxy: Arc<EventLoopProxy<GjEvent>>
+}
+
+impl UiContext {
+    pub fn new(event_loop_proxy: Arc<EventLoopProxy<GjEvent>>) -> Self {
+        Self {
+            jobs: Vec::new(),
+            current_job_id: None,
+            event_loop_proxy
+        }
+    }
+
+    pub fn send_event(&self, event: UiEvent) {
+        self.event_loop_proxy.send_event(GjEvent::Ui(event)).unwrap();
+    }
+}
 
 pub struct UiState {
     pub(crate) egui_state: egui_winit::State,
     pub(crate) egui_ctx: egui::Context,
     pub(crate) egui_renderer: egui_wgpu::Renderer,
 
-    ui_outgoing: Vec<UiEvent>,
-    app_incoming: Vec<AppEvent>,
-
-    app_event_tx: std::sync::mpsc::Sender<AppEvent>,
-
-    panels: Panels,
+    components: Vec<Box<dyn UiComponent>>,
+    pub(crate) ui_ctx: UiContext,
 }
 
 impl UiState {
-    pub fn new(gfx: &GfxState, window: Arc<Window>) -> Self {
+    pub fn new(gfx: &GfxState, window: Arc<Window>, event_loop_proxy: Arc<EventLoopProxy<GjEvent>>) -> Self {
         let egui_ctx = egui::Context::default();
+
         let egui_state = egui_winit::State::new(
             egui_ctx.clone(),
             egui::ViewportId::ROOT,
@@ -33,90 +80,45 @@ impl UiState {
         );
 
         let egui_renderer = egui_wgpu::Renderer::new(
-            &gfx.device,
-            gfx.config.format,
-            egui_wgpu::RendererOptions::default()
-        );
-
-        let (tx, rx) = std::sync::mpsc::channel::<AppEvent>();
+            &gfx.device, gfx.config.format, egui_wgpu::RendererOptions::default());
 
         Self {
             egui_ctx,
             egui_state,
             egui_renderer,
-            ui_outgoing: Vec::new(),
-            app_incoming: Vec::new(),
-            app_event_tx: tx,
-            panels: Panels::default(),
+            components: Vec::new(),
+            ui_ctx: UiContext::new(event_loop_proxy),
         }
     }
 
-    pub fn on_window_event(&mut self, window: &winit::window::Window, event: &winit::event::WindowEvent) -> egui_winit::EventResponse {
-        self.egui_state.on_window_event(window, event)
-    }
-
-    pub fn draw(&mut self, window: &winit::window::Window) -> (egui::FullOutput, Vec<UiEvent>) {
+    pub fn draw(&mut self, window: &Window) -> egui::FullOutput {
         let raw_input = self.egui_state.take_egui_input(window);
-        let mut sender = UiEventSender::default();
 
-        let full_output = self.egui_ctx.run(raw_input, |ctx| {
-            self.panels.draw(ctx, &mut sender);
-        });
-
-        let events = sender.take_events();
-        (full_output, events)
+        self.egui_ctx.run(raw_input, |ctx| {
+            for component in self.components.iter_mut() {
+                component.show(ctx, &self.ui_ctx);
+            }
+        })
     }
 
-    fn draw_panels(&mut self, ctx: &Context) {
-        let mut sender = UiEventSender::default();
-        self.panels.draw(ctx, &mut sender);
-
-        // merge events
-        self.ui_outgoing.extend(sender.take_events());
+    pub fn add_component(&mut self, component: Box<dyn UiComponent>) {
+        self.components.push(component);
     }
 
-    pub fn push_app_event(&mut self, ev: AppEvent) {
-        self.app_incoming.push(ev);
+    pub fn set_jobs(&mut self, jobs: Vec<JobRecord>) {
+        self.ui_ctx.jobs = jobs;
     }
 
-    pub fn take_ui_events(&mut self) -> Vec<UiEvent> {
-        std::mem::take(&mut self.ui_outgoing)
-    }
-
-    pub fn app_event_sender_clone(&self) -> std::sync::mpsc::Sender<AppEvent> {
-        self.app_event_tx.clone()
-    }
-
-    /// internal: call after draw_ui to merge events and broadcast app_incoming to panels
-    pub fn after_draw_process(&mut self, full_output: egui::FullOutput, events_from_draw: Vec<UiEvent>) {
-        // collect outgoing ui events
-        self.ui_outgoing.extend(events_from_draw);
-
-        // broadcast app events to all panels (so child components can react)
-        for app_ev in self.app_incoming.drain(..) {
-            self.panels.on_app_event(&app_ev);
+    pub async fn on_app_event(&mut self, e: AppEvent) {
+        for component in self.components.iter_mut() {
+            component.on_app_event(e.clone()).await;
         }
-
-        // handle platform output (clipboard, window title, etc.) is done by caller
     }
 }
 
-#[derive(Default)]
-pub struct UiEventSender {
-    events: Vec<UiEvent>,
-}
+#[async_trait]
+pub trait UiComponent : Send + Sync {
+    fn show(&mut self, ctx: &Context, ui_ctx: &UiContext);
 
-impl UiEventSender {
-    pub fn instant(&mut self, e: UiEvent) {
-        self.events.push(e);
-    }
-    pub fn take_events(&mut self) -> Vec<UiEvent> {
-        std::mem::take(&mut self.events)
-    }
-}
-
-pub trait UiComponent {
-    fn show(&mut self, ctx: &Context, sender: &mut UiEventSender);
-
-    fn on_app_event(&mut self, _ev: &AppEvent) {}
+    async fn on_app_event(&mut self, e: AppEvent) {}
 }

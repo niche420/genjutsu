@@ -1,33 +1,17 @@
-from python.shared.celery_app import celery_app
-import time
+"""
+Celery tasks for 3D generation
+This module is imported by both the API and the worker
+"""
+import sys
+from pathlib import Path
 
-@celery_app.task(bind=True, name='tasks.generate_task')
-def generate_task(self, prompt: str, params: dict):
-    """
-    Long-running generation task
-    Replace this with your actual generation logic
-    """
-    try:
-        # Update task state to show progress
-        self.update_state(state='STARTED', meta={'status': 'Initializing...'})
+# Add parent directory to path for shared module
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
-        # Simulate long-running generation
-        # Replace this with your actual generation code
-        time.sleep(5)  # Simulating work
+from shared.celery_app import celery_app
 
-        self.update_state(state='STARTED', meta={'status': 'Generating...'})
+# Import the actual task implementation
+from worker.worker import generate_3d
 
-        # Your actual generation logic here
-        # Example: result = your_model.generate(prompt, **params)
-        result = {
-            "generated_text": f"Generated content for: {prompt}",
-            "prompt": prompt,
-            "params": params
-        }
-
-        return result
-
-    except Exception as e:
-        # Log the error and re-raise
-        self.update_state(state='FAILURE', meta={'error': str(e)})
-        raise
+# Re-export for API to import
+__all__ = ['generate_3d']

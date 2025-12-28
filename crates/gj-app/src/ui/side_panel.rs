@@ -1,33 +1,28 @@
+use std::sync::Arc;
+use async_trait::async_trait;
+use chrono::Utc;
 use egui::{Context, RichText, TextEdit, Color32};
 use gj_core::Model3D;
-use crate::events::{AppEvent, UiEvent};
-use crate::ui::UiEventSender;
+use crate::events::{AppEvent, GjEvent};
+use crate::ui::{UiComponent, UiContext, UiEvent};
 
 pub struct SidePanel {
-    // Model selection (currently only Shap-E)
     pub selected_model: Model3D,
-
-    // Status
-    pub last_status: Option<String>,
-
-    // Prompt input
     pub prompt_text: String,
-    pub is_generating: bool,
 }
 
 impl Default for SidePanel {
     fn default() -> Self {
         Self {
             selected_model: Model3D::ShapE,
-            last_status: None,
             prompt_text: String::new(),
-            is_generating: false,
         }
     }
 }
 
-impl SidePanel {
-    pub fn show(&mut self, ctx: &Context, sender: &mut UiEventSender) {
+#[async_trait]
+impl UiComponent for SidePanel {
+    fn show(&mut self, ctx: &Context, ui_ctx: &UiContext) {
         egui::SidePanel::left("side_panel")
             .default_width(340.0)
             .show(ctx, |ui| {
@@ -37,13 +32,11 @@ impl SidePanel {
                 // === Model Info ===
                 ui.heading(RichText::new("⚡ Shap-E").size(16.0));
                 ui.add_space(5.0);
-
                 ui.label(
                     RichText::new("OpenAI's fast text-to-3D model (~30-60 seconds)")
                         .small()
                         .color(Color32::LIGHT_BLUE)
                 );
-
                 ui.separator();
 
                 // === Prompt Input ===
@@ -56,27 +49,24 @@ impl SidePanel {
                     .hint_text("e.g., a red sports car, a medieval sword, a coffee mug...");
 
                 ui.add(text_edit);
-
                 ui.add_space(8.0);
 
                 let generate_button = ui.add_enabled(
-                    !self.is_generating && !self.prompt_text.trim().is_empty(),
+                    !self.prompt_text.trim().is_empty(),
                     egui::Button::new(
-                        RichText::new("🎨 Generate 3D Model")
+                        RichText::new("🎨 Add to Queue")
                             .size(14.0)
                     )
                         .min_size(egui::vec2(ui.available_width(), 30.0))
                 );
 
                 if generate_button.clicked() {
-                    sender.instant(UiEvent::GenerateWithModel {
+                    ui_ctx.send_event(UiEvent::GenerateWithModel {
                         prompt: self.prompt_text.clone(),
                         model: self.selected_model,
                     });
-                    self.is_generating = true;
+                    self.prompt_text.clear();  // Clear after adding to queue
                 }
-
-                ui.add_space(5.0);
 
                 ui.separator();
 
@@ -120,31 +110,13 @@ impl SidePanel {
 
                 ui.separator();
 
-                // === Status Display ===
-                if let Some(ref s) = self.last_status {
-                    let status_color = if s.contains("Error") || s.contains("Failed") {
-                        Color32::from_rgb(255, 100, 100)
-                    } else if s.contains("Generated") || s.contains("ready") || s.contains("success") {
-                        Color32::from_rgb(100, 255, 100)
-                    } else {
-                        Color32::LIGHT_BLUE
-                    };
-
-                    ui.label(
-                        RichText::new(format!("Status: {}", s))
-                            .color(status_color)
-                    );
-                }
-
-                ui.separator();
-
                 // === Camera Controls ===
                 ui.heading("🎮 Camera Controls");
                 ui.label("• Left drag: Rotate");
                 ui.label("• Mouse wheel: Zoom");
 
                 if ui.button("🔄 Reset Camera").clicked() {
-                    sender.instant(UiEvent::ResetCamera);
+                    ui_ctx.send_event(UiEvent::ResetCamera);
                 }
 
                 ui.separator();
@@ -157,29 +129,5 @@ impl SidePanel {
                     ui.label("Generation: ~30-60 seconds");
                 });
             });
-    }
-
-    pub fn on_app_event(&mut self, ev: &AppEvent) {
-        match ev {
-            AppEvent::Status(s) => {
-                self.last_status = Some(s.clone());
-
-                if s.contains("Generated") || s.contains("Error") || s.contains("Failed") ||
-                    s.contains("ready") || s.contains("success") || s.contains("Loaded") {
-                    self.is_generating = false;
-                }
-            }
-            AppEvent::Progress(p) => {
-                self.last_status = Some(format!("Progress: {:.0}%", p * 100.0));
-            }
-            AppEvent::SceneReady => {
-                self.last_status = Some("Scene ready".into());
-                self.is_generating = false;
-            }
-            AppEvent::GaussianCloudReady => {
-                self.is_generating = false;
-            }
-            _ => {}
-        }
     }
 }

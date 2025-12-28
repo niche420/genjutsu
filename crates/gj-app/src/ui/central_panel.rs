@@ -1,12 +1,14 @@
+use async_trait::async_trait;
 use egui::{Color32, Context, RichText};
 use crate::events::AppEvent;
-use crate::ui::UiEventSender;
+use crate::ui::{UiComponent, UiContext};
 
 #[derive(Default)]
 pub struct CentralPanel {}
 
-impl CentralPanel {
-    pub fn show(&mut self, ctx: &Context, _sender: &mut UiEventSender) {
+#[async_trait]
+impl UiComponent for CentralPanel {
+    fn show(&mut self, ctx: &Context, ui_ctx: &UiContext) {
         egui::CentralPanel::default()
             .frame(egui::Frame::default().fill(Color32::TRANSPARENT))
             .show(ctx, |ui| {
@@ -20,6 +22,4 @@ impl CentralPanel {
                 });
             });
     }
-
-    pub fn on_app_event(&mut self, _ev: &AppEvent) {}
 }

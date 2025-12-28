@@ -4,15 +4,18 @@ Celery worker for 3D generation tasks
 import sys
 from pathlib import Path
 from datetime import datetime
-import torch
+import os
+import time
+
+import requests
 
 # Add parent directory to path for shared module
-sys.path.insert(0, str(Path(__file__).parent))
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from shared.celery_app import celery_app
 from shared.config import OUTPUT_DIR, DEVICE
+from shared.schemas.jobs import JobStatus
 from models.shap_e import ShapEModel
-
 
 # Load models on worker startup
 print("=" * 60)
@@ -38,35 +41,56 @@ print(f"Loaded {len(MODELS)} model(s)")
 print("=" * 60)
 print()
 
+# Rust backend callback URL
+RUST_CALLBACK_URL = os.getenv('RUST_CALLBACK_URL', 'http://host.docker.internal:3000')
+
+
+def notify_rust_backend(job_id: str, metadata: dict, outputs: dict = None):
+    """Send status update to Rust app for UI display"""
+    try:
+        payload = {
+            "id": job_id,
+            "data": metadata,
+            "outputs": outputs
+        }
+
+        response = requests.post(
+            f"{RUST_CALLBACK_URL}/job/{job_id}/progress",
+            json=payload,
+            timeout=2
+        )
+
+        if response.status_code != 200:
+            print(f"Warning: Callback failed with status {response.status_code}")
+
+    except requests.exceptions.Timeout:
+        print(f"Warning: Callback timeout (Rust backend may be slow)")
+    except requests.exceptions.RequestException as e:
+        print(f"Warning: Failed to notify Rust app: {e}")
+
 
 @celery_app.task(name='worker.generate_3d', bind=True)
 def generate_3d(self, prompt: str, model_name: str, guidance_scale: float, num_inference_steps: int):
-    """
-    Generate 3D model from text prompt
+    """Generate 3D model from text prompt"""
+    job_id = self.request.id
 
-    Args:
-        self: Task instance (for progress updates)
-        prompt: Text description
-        model_name: Model to use
-        guidance_scale: Guidance scale parameter
-        num_inference_steps: Number of diffusion steps
-
-    Returns:
-        dict with output_path and metadata
-    """
     try:
-        # Update state to STARTED
-        self.update_state(
-            state='STARTED',
-            meta={
-                'progress': 0.0,
-                'message': f'Starting {model_name} generation...'
-            }
-        )
-
         # Check model exists
         if model_name not in MODELS:
-            raise ValueError(f"Model '{model_name}' not available")
+            error_msg = f"Model '{model_name}' not available"
+            notify_rust_backend(
+                job_id,
+                metadata={
+                    "status": JobStatus.FAILED.value,
+                    "progress": 0.0,
+                    "message": None,
+                    "error": error_msg,
+                    "created_at": datetime.utcnow().isoformat() + 'Z',
+                    "updated_at": datetime.utcnow().isoformat() + 'Z',
+                    "completed_at": datetime.utcnow().isoformat() + 'Z'
+                }
+            )
+            raise ValueError(error_msg)
 
         model = MODELS[model_name]
 
@@ -79,7 +103,7 @@ def generate_3d(self, prompt: str, model_name: str, guidance_scale: float, num_i
         output_path = OUTPUT_DIR / output_name
 
         print(f"\n{'='*60}")
-        print(f"Job ID: {self.request.id}")
+        print(f"Job ID: {job_id}")
         print(f"Model: {model.get_name()}")
         print(f"Prompt: {prompt}")
         print(f"Output: {output_path}")
@@ -87,61 +111,134 @@ def generate_3d(self, prompt: str, model_name: str, guidance_scale: float, num_i
         print(f"Steps: {num_inference_steps}")
         print(f"{'='*60}\n")
 
-        # Progress callback
+        # Small delay to ensure DB insert has completed on Rust side
+        time.sleep(0.5)
+
+        # Initial status - mark as started
+        notify_rust_backend(
+            job_id,
+            metadata={
+                "status": JobStatus.GENERATING.value,
+                "progress": 0.0,
+                "message": "Initializing generation...",
+                "error": None,
+                "created_at": datetime.utcnow().isoformat() + 'Z',
+                "updated_at": datetime.utcnow().isoformat() + 'Z',
+                "completed_at": None
+            }
+        )
+
+        # Track last update time to throttle notifications
+        last_update_time = time.time()
+        update_interval = 0.5  # Send update every 0.5 seconds minimum
+
+        # Progress callback - updates Rust UI frequently
         def progress_callback(progress: float, message: str):
-            self.update_state(
-                state='STARTED',
-                meta={
-                    'progress': progress,
-                    'message': message
-                }
-            )
+            nonlocal last_update_time
+
+            current_time = time.time()
+
+            # Send update if enough time has passed OR if it's a significant progress jump
+            if (current_time - last_update_time >= update_interval):
+                notify_rust_backend(
+                    job_id,
+                    metadata={
+                        "status": JobStatus.GENERATING.value,
+                        "progress": progress,
+                        "message": message,
+                        "error": None,
+                        "created_at": datetime.utcnow().isoformat() + 'Z',
+                        "updated_at": datetime.utcnow().isoformat() + 'Z',
+                        "completed_at": None
+                    }
+                )
+                last_update_time = current_time
+
             print(f"[{progress*100:.0f}%] {message}")
 
-        # Update progress
-        progress_callback(0.1, 'Initializing model...')
-
-        # Generate
+        # Generate with progress tracking
         try:
             result_path = model.generate(
                 prompt,
                 output_path,
+                progress_callback=progress_callback,
                 guidance_scale=guidance_scale,
                 num_inference_steps=num_inference_steps
             )
+
+            # Verify file exists
+            if not result_path.exists():
+                raise FileNotFoundError(f"Output file not created: {result_path}")
+
+            print(f"\n✓ Generation complete: {result_path}")
+
         except ValueError as e:
-            # Generation failed - return helpful error
             error_msg = str(e)
-            if "flat" in error_msg.lower() or "degenerate" in error_msg.lower():
-                raise ValueError(
-                    f"Generated mesh is flat/invalid. Try:\n"
-                    f"  • More specific prompt (add details about shape/structure)\n"
-                    f"  • Higher guidance scale (try 20-25)\n"
-                    f"  • Different prompt entirely"
-                )
+
+            # Job failed
+            notify_rust_backend(
+                job_id,
+                metadata={
+                    "status": JobStatus.FAILED.value,
+                    "progress": 0.0,
+                    "message": None,
+                    "error": error_msg,
+                    "created_at": datetime.utcnow().isoformat() + 'Z',
+                    "updated_at": datetime.utcnow().isoformat() + 'Z',
+                    "completed_at": datetime.utcnow().isoformat() + 'Z'
+                }
+            )
             raise
 
-        progress_callback(1.0, 'Complete!')
+        # Get relative path for Rust app
+        relative_path = str(result_path.relative_to(OUTPUT_DIR.parent))
+        print(f"Relative path for Rust: {relative_path}")
 
-        # Return result
+        # Job completed successfully
+        notify_rust_backend(
+            job_id,
+            metadata={
+                "status": JobStatus.COMPLETE.value,
+                "progress": 1.0,
+                "message": "Generation complete!",
+                "error": None,
+                "created_at": datetime.utcnow().isoformat() + 'Z',
+                "updated_at": datetime.utcnow().isoformat() + 'Z',
+                "completed_at": datetime.utcnow().isoformat() + 'Z'
+            },
+            outputs={
+                "ply_path": relative_path
+            }
+        )
+
         return {
-            'output_path': str(result_path),
-            'model': model_name,
-            'prompt': prompt,
-            'guidance_scale': guidance_scale,
-            'num_inference_steps': num_inference_steps
+            "ply_path": relative_path
         }
 
     except Exception as e:
-        print(f"\n✗ Job failed: {str(e)}\n")
+        error_msg = str(e)
+        print(f"\n✗ Job failed: {error_msg}\n")
+
+        # Unexpected failure
+        notify_rust_backend(
+            job_id,
+            metadata={
+                "status": JobStatus.FAILED.value,
+                "progress": 0.0,
+                "message": None,
+                "error": error_msg,
+                "created_at": datetime.utcnow().isoformat() + 'Z',
+                "updated_at": datetime.utcnow().isoformat() + 'Z',
+                "completed_at": datetime.utcnow().isoformat() + 'Z'
+            }
+        )
         raise
 
 
 if __name__ == '__main__':
-    # Start worker
     celery_app.worker_main([
         'worker',
         '--loglevel=info',
-        '--concurrency=1',  # Single worker (GPU)
-        '--pool=solo'  # Use solo pool for GPU work
+        '--concurrency=1',
+        '--pool=solo'
     ])

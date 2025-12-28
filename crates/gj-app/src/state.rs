@@ -1,21 +1,28 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 use egui_wgpu::wgpu;
 use egui_wgpu::wgpu::StoreOp;
 use winit::event::WindowEvent;
 use winit::window::Window;
-
+use chrono::Utc;
+use log::info;
+use surrealdb::types::Datetime as SurrealDatetime;
+use surrealdb_types::{RecordIdKey, ToSql};
+use winit::event_loop::EventLoopProxy;
 use gj_core::gaussian_cloud::GaussianCloud;
 use gj_splat::camera::Camera;
 use gj_splat::renderer::GaussianRenderer;
-
-use crate::events::{AppEvent, UiEvent};
+use crate::generator::db::job::JobRecord;
+use crate::events::{AppEvent, GenEvent, GjEvent};
+use crate::generator::Generator;
 use crate::gfx::GfxState;
-use crate::worker::{InferenceWorker, WorkerResponse};
-use crate::ui::UiState;
-use crate::worker;
+use crate::job::{JobMetadata, JobOutputs, JobStatus};
+use crate::ui;
+use crate::ui::{UiEvent, UiState};
 
 pub struct AppState {
     pub(crate) window: Arc<Window>,
+    event_loop_proxy: Arc<EventLoopProxy<GjEvent>>,
 
     pub gfx: GfxState,
     pub ui: UiState,
@@ -29,20 +36,27 @@ pub struct AppState {
     pub prompt: String,
     pub status: String,
 
-    pub lgm_worker: InferenceWorker,
-
     // Mouse state
     pub mouse_pressed: bool,
     pub last_mouse_pos: Option<(f32, f32)>,
 
-    // Tokio runtime for background tasks
-    pub rt: tokio::runtime::Runtime,
+    pub(crate) generator: Generator,
+
+    // In-memory cache of active job progress (not persisted)
+    pub active_job_progress: HashMap<String, (JobMetadata, Option<JobOutputs>)>,
 }
 
 impl AppState {
-    pub async fn new(window: Arc<Window>) -> anyhow::Result<Self> {
+    pub async fn new(window: Arc<Window>, event_loop_proxy: Arc<EventLoopProxy<GjEvent>>) -> anyhow::Result<Self> {
+        let generator = Generator::new(event_loop_proxy.clone()).await?;
+
         let gfx = GfxState::new(window.clone()).await?;
-        let ui = UiState::new(&gfx, window.clone());
+        let mut ui_state = UiState::new(&gfx, window.clone(), event_loop_proxy.clone());
+
+        ui_state.add_component(Box::new(ui::CentralPanel::default()));
+        ui_state.add_component(Box::new(ui::SidePanel::default()));
+        ui_state.add_component(Box::new(ui::TopPanel::default()));
+        ui_state.add_component(Box::new(ui::QueuePanel::default()));
 
         let renderer = GaussianRenderer::new(
             gfx.device.clone(),
@@ -53,43 +67,171 @@ impl AppState {
         let mut camera = Camera::default();
         let size = window.inner_size();
         camera.aspect_ratio = size.width as f32 / size.height as f32;
-        
-        let lgm_worker = InferenceWorker::new();
 
-        let rt = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(4)
-            .enable_all()
-            .build()?;
-
-        Ok(Self {
+        let mut state = Self {
             window,
+            event_loop_proxy,
             renderer,
             camera,
-            lgm_worker,
             gfx,
-            ui,
+            ui: ui_state,
             gaussian_cloud: None,
-
             prompt: String::new(),
             status: "Ready".into(),
-
             mouse_pressed: false,
             last_mouse_pos: None,
+            generator,
+            active_job_progress: HashMap::new(),
+        };
 
-            rt,
-        })
+        // Load existing jobs from database and clean up stale states
+        state.load_and_cleanup_jobs().await?;
+
+        Ok(state)
     }
 
-    pub fn init(&mut self) {
-        // Seed UI with initial state
-        self.ui.push_app_event(AppEvent::Status(self.status.clone()));
+    /// Load all jobs from database and clean up stale GENERATING states
+    async fn load_and_cleanup_jobs(&mut self) -> anyhow::Result<()> {
+        let mut jobs = self.generator.get_jobs().await?;
 
-        if self.gaussian_cloud.is_some() {
-            self.ui.push_app_event(AppEvent::SceneReady);
+        println!("Loaded {} jobs from database", jobs.len());
+
+        // Clean up jobs that were interrupted
+        for job in &mut jobs {
+            match job.metadata.status {
+                JobStatus::GENERATING | JobStatus::QUEUED => {
+                    // Check if outputs actually exist on disk
+                    let found_output_path = self.generator.db.verify_outputs(job);
+
+                    if let Some(ply_path) = found_output_path {
+                        // Job was actually completed, just didn't update DB before shutdown
+                        println!(
+                            "Job {:?} has outputs at '{}' but status is {:?} - marking as COMPLETE",
+                            job.id, ply_path, job.metadata.status
+                        );
+
+                        let mut updated_metadata = job.metadata.clone();
+                        updated_metadata.status = JobStatus::COMPLETE;
+                        updated_metadata.progress = 1.0;
+                        updated_metadata.message = Some("Generation complete".to_string());
+                        updated_metadata.error = None;
+                        updated_metadata.completed_at = Some(chrono::Utc::now().into());
+                        updated_metadata.updated_at = chrono::Utc::now().into();
+
+                        // Create outputs with the found path
+                        let outputs = Some(JobOutputs { ply_path });
+
+                        // Update in database using RecordId directly
+                        self.generator.update_job_status_by_id(
+                            job.id.clone(),
+                            updated_metadata.clone(),
+                            outputs.clone()
+                        ).await?;
+
+                        // Update local copy
+                        job.metadata = updated_metadata;
+                        job.outputs = outputs;
+
+                        println!("  ✓ Marked as COMPLETE with recovered output path");
+                    } else {
+                        // Job was genuinely interrupted - no outputs found
+                        println!(
+                            "Cleaning up stale job: {:?} (was {:?}, no outputs found)",
+                            job.id, job.metadata.status
+                        );
+
+                        let mut updated_metadata = job.metadata.clone();
+                        updated_metadata.status = JobStatus::FAILED;
+                        updated_metadata.error = Some("Job interrupted by application shutdown".to_string());
+                        updated_metadata.message = None;
+                        updated_metadata.completed_at = Some(chrono::Utc::now().into());
+                        updated_metadata.updated_at = chrono::Utc::now().into();
+
+                        // Update in database using RecordId directly
+                        self.generator.update_job_status_by_id(
+                            job.id.clone(),
+                            updated_metadata.clone(),
+                            None
+                        ).await?;
+
+                        // Update local copy
+                        job.metadata = updated_metadata;
+                        job.outputs = None;
+
+                        println!("  ✓ Marked as FAILED");
+                    }
+                }
+                JobStatus::COMPLETE => {
+                    // Verify outputs still exist
+                    let found_output_path = self.generator.db.verify_outputs(job);
+
+                    if found_output_path.is_none() {
+                        println!(
+                            "Job {:?} marked COMPLETE but outputs missing - marking as FAILED",
+                            job.id
+                        );
+
+                        let mut updated_metadata = job.metadata.clone();
+                        updated_metadata.status = JobStatus::FAILED;
+                        updated_metadata.error = Some("Output file was deleted or moved".to_string());
+                        updated_metadata.updated_at = chrono::Utc::now().into();
+
+                        // Update in database
+                        self.generator.update_job_status_by_id(
+                            job.id.clone(),
+                            updated_metadata.clone(),
+                            None
+                        ).await?;
+
+                        // Update local copy and clear outputs
+                        job.metadata = updated_metadata;
+                        job.outputs = None;
+
+                        println!("  ✓ Marked as FAILED (missing outputs)");
+                    } else if job.outputs.is_none() && found_output_path.is_some() {
+                        // Job is COMPLETE but outputs field is empty - fix it
+                        println!(
+                            "Job {:?} is COMPLETE but missing outputs field - repairing",
+                            job.id
+                        );
+
+                        let ply_path = found_output_path.unwrap();
+                        let outputs = Some(JobOutputs { ply_path });
+
+                        // Update in database
+                        self.generator.update_job_status_by_id(
+                            job.id.clone(),
+                            job.metadata.clone(),
+                            outputs.clone()
+                        ).await?;
+
+                        // Update local copy
+                        job.outputs = outputs;
+
+                        println!("  ✓ Repaired outputs field");
+                    }
+                }
+                _ => {
+                    // FAILED jobs are fine as-is
+                }
+            }
         }
+
+        self.ui.set_jobs(jobs);
+        Ok(())
     }
 
-    // --- Window resizing ----------------------------------------------------
+    /// Load all jobs from database and update UI
+    async fn load_jobs(&mut self) -> anyhow::Result<()> {
+        let jobs = self.generator.get_jobs().await?;
+        println!("Loaded {} jobs from database", jobs.len());
+        self.ui.set_jobs(jobs);
+        Ok(())
+    }
+
+    pub fn push_event(&self, event: AppEvent) {
+        self.event_loop_proxy.send_event(GjEvent::App(event)).unwrap();
+    }
 
     pub fn resize(&mut self, new_size: winit::dpi::PhysicalSize<u32>) {
         if new_size.width > 0 && new_size.height > 0 {
@@ -98,7 +240,11 @@ impl AppState {
         }
     }
 
-    // --- Mouse + keyboard input --------------------------------------------
+    pub fn reset_camera(&mut self) {
+        self.camera = Camera::default();
+        let size = self.window.inner_size();
+        self.camera.aspect_ratio = size.width as f32 / size.height as f32;
+    }
 
     pub fn input(&mut self, event: &WindowEvent) -> bool {
         use winit::event::{ElementState, MouseScrollDelta};
@@ -141,131 +287,6 @@ impl AppState {
         }
     }
 
-    // --- Event processing from UI ------------------------------------------
-
-    pub fn update(&mut self) {
-        // Check for responses from the LGM worker
-        while let Some(response) = self.lgm_worker.try_recv_response() {
-            match response {
-                WorkerResponse::Success(cloud) => {
-                    self.load_gaussian_cloud(cloud);
-                    self.ui.push_app_event(AppEvent::SceneReady);
-                }
-                WorkerResponse::Error(err) => {
-                    self.status = format!("Error: {}", err);
-                    self.ui.push_app_event(AppEvent::Status(self.status.clone()));
-                    self.ui.push_app_event(AppEvent::Log(format!("Pipeline error: {}", err)));
-                }
-                WorkerResponse::Progress(p, ..) => {
-                    self.ui.push_app_event(AppEvent::Progress(p));
-                }
-                WorkerResponse::Status(s) => {
-                    self.status = s.clone();
-                    self.ui.push_app_event(AppEvent::Status(s));
-                },
-                WorkerResponse::JobSubmitted(jobId) => self.ui.push_app_event(AppEvent::Status(jobId))
-            }
-        }
-
-        let ui_events = self.ui.take_ui_events();
-
-        for ev in ui_events {
-            match ev {
-                UiEvent::ResetCamera => {
-                    self.camera = Camera::default();
-                    let size = self.window.inner_size();
-                    self.camera.aspect_ratio = size.width as f32 / size.height as f32;
-
-                    self.ui.push_app_event(AppEvent::Status("Camera reset".into()));
-                }
-
-                UiEvent::ToggleWireframe(enabled) => {
-                    self.ui.push_app_event(AppEvent::WireframeState(enabled));
-                }
-
-                UiEvent::GenerateWithModel { prompt, model } => {
-                    let worker_tx = self.lgm_worker.command_tx.clone();
-                    let ui_tx = self.ui.app_event_sender_clone();
-                    let window = self.window.clone();
-                    let prompt_clone = prompt.clone();
-
-                    self.prompt = prompt;
-
-                    self.rt.spawn_blocking(move || {
-                        let _ = ui_tx.send(AppEvent::Status(
-                            format!("Generating with {:?}...", model)
-                        ));
-
-                        if let Err(e) = worker_tx.send(worker::WorkerCommand::GenerateFromPrompt {
-                            prompt: prompt_clone,
-                            model: model.into() // Convert UI model to worker model
-                        }) {
-                            let _ = ui_tx.send(AppEvent::Status(format!("Worker error: {}", e)));
-                        }
-
-                        window.request_redraw();
-                    });
-                }
-
-                UiEvent::PromptChanged(new_prompt) => {
-                    self.prompt = new_prompt;
-                }
-
-                UiEvent::LoadImages => {
-                    let window = self.window.clone();
-                    let worker_tx = self.lgm_worker.command_tx.clone();
-                    let ui_tx = self.ui.app_event_sender_clone();
-
-                    // Spawn file picker on blocking thread pool
-                    self.rt.spawn_blocking(move || {
-                        let _ = ui_tx.send(AppEvent::Status("Opening file dialog...".into()));
-
-                        if let Some(files) = rfd::FileDialog::new()
-                            .add_filter("Images", &["png", "jpg", "jpeg"])
-                            .pick_files()
-                        {
-                            let _ = ui_tx.send(AppEvent::Status("Loading images...".into()));
-
-                            // Load images on this thread
-                            let images: Result<Vec<_>, _> = files.iter()
-                                .enumerate()
-                                .map(|(i, path)| {
-                                    let progress = (i as f32) / (files.len() as f32);
-                                    let _ = ui_tx.send(AppEvent::Progress(progress));
-                                    image::open(path).map(|img| img.to_rgba8())
-                                })
-                                .collect();
-
-                            match images {
-                                Ok(images) => {
-                                    let _ = ui_tx.send(AppEvent::Status("Generating 3D model...".into()));
-
-                                    // Send images to worker for processing
-                                    if let Err(e) = worker_tx.send(crate::worker::WorkerCommand::GenerateFromImages(images)) {
-                                        let _ = ui_tx.send(AppEvent::Status(format!("Worker error: {}", e)));
-                                    }
-                                }
-                                Err(e) => {
-                                    let _ = ui_tx.send(AppEvent::Status(format!("Failed to load images: {}", e)));
-                                    let _ = ui_tx.send(AppEvent::Log(format!("Image load error: {}", e)));
-                                }
-                            }
-                        } else {
-                            let _ = ui_tx.send(AppEvent::Status("File selection cancelled".into()));
-                        }
-
-                        window.request_redraw();
-                    });
-                }
-
-                UiEvent::Log(msg) => {
-                    self.ui.push_app_event(AppEvent::Log(format!("UI: {}", msg)));
-                }
-                _ => {}
-            }
-        }
-    }
-
     pub fn load_gaussian_cloud(&mut self, cloud: GaussianCloud) {
         // Compute bounds
         let bounds = cloud.bounds();
@@ -287,8 +308,6 @@ impl AppState {
         self.gaussian_cloud = Some(cloud);
     }
 
-    // --- 3D rendering + UI rendering ---------------------------------------
-
     pub fn render(&mut self) -> anyhow::Result<()> {
         let size = self.window.inner_size();
         if size.width == 0 || size.height == 0 {
@@ -301,9 +320,8 @@ impl AppState {
             label: Some("Render Encoder")
         });
 
-        // --- 3D scene -------------------------------------------------------
-
-        if let Some(ref cloud) = self.gaussian_cloud {
+        // 3D scene
+        if let Some(ref _cloud) = self.gaussian_cloud {
             let size = self.window.inner_size();
             self.renderer.render(
                 &mut encoder,
@@ -329,9 +347,8 @@ impl AppState {
             });
         }
 
-        // --- UI -------------------------------------------------------------
-
-        let (full_output, ui_events) = self.ui.draw(&self.window);
+        // UI
+        let full_output = self.ui.draw(&self.window);
 
         let platform_output = full_output.platform_output.clone();
         self.ui.egui_state.handle_platform_output(&self.window, platform_output);
@@ -358,7 +375,6 @@ impl AppState {
             &screen_desc,
         );
 
-        // draw UI pass
         {
             let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("egui pass"),
@@ -385,8 +401,150 @@ impl AppState {
         self.gfx.queue.submit(std::iter::once(encoder.finish()));
         output.present();
 
-        // Merge UI events + broadcast to panels (child components)
-        self.ui.after_draw_process(full_output, ui_events);
+        Ok(())
+    }
+
+    pub fn on_ui_event(&mut self, event: UiEvent) {
+        pollster::block_on(
+            async {
+                match event {
+                    UiEvent::GenerateWithModel { prompt, model } => {
+                        self.generator.submit_job(prompt, model).await?;
+                        self.load_jobs().await?;
+                    }
+                    UiEvent::ResetCamera => {
+                        self.reset_camera();
+                        self.push_event(AppEvent::Status("Camera reset".into()));
+                    }
+                    UiEvent::RemoveJob(id) => {
+                        self.generator.remove_job(id).await?;
+                        self.load_jobs().await?;
+                    }
+                    UiEvent::LoadScene(id) => {
+                        self.load_scene_by_id(id).await?;
+                    }
+                    UiEvent::ClearCompletedJobs => {
+                        self.generator.clear_completed().await?;
+                        self.load_jobs().await?;
+                    }
+                    _ => {}
+                }
+                anyhow::Ok(())
+            }
+        ).unwrap();
+    }
+
+    /// Handle job status updates from Python worker
+    pub async fn on_gen_event(&mut self, event: GenEvent) -> anyhow::Result<()> {
+        match event {
+            GenEvent::JobStatus { id, data, outputs } => {
+                match data.status {
+                    JobStatus::COMPLETE | JobStatus::FAILED => {
+                        // Terminal state - persist to database
+                        self.generator.update_job_status(id.clone(), data.clone(), outputs.clone()).await?;
+
+                        // Remove from in-memory cache
+                        self.active_job_progress.remove(&id);
+
+                        // Refresh UI from database
+                        self.load_jobs().await?;
+
+                        // Auto-load if complete
+                        if data.status == JobStatus::COMPLETE {
+                            if let Some(ref job_outputs) = outputs {
+                                self.load_scene_from_path(&job_outputs.ply_path).await?;
+                            }
+                        }
+                    }
+                    JobStatus::GENERATING => {
+                        // Check if this is the first GENERATING update
+                        let is_first = !self.active_job_progress.contains_key(&id);
+
+                        if is_first {
+                            // First GENERATING - write to DB to mark as started
+                            self.generator.update_job_status(id.clone(), data.clone(), outputs.clone()).await?;
+                            self.load_jobs().await?;
+                        }
+
+                        // Update in-memory cache (for all GENERATING updates)
+                        self.active_job_progress.insert(id.clone(), (data.clone(), outputs.clone()));
+
+                        // Update UI immediately (don't wait for DB)
+                        self.update_ui_job_progress(&id, data, outputs);
+                    }
+                    JobStatus::QUEUED => {
+                        // Update memory cache
+                        self.active_job_progress.insert(id.clone(), (data.clone(), outputs.clone()));
+
+                        // Update UI
+                        self.update_ui_job_progress(&id, data, outputs);
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Update a job's progress in the UI state directly
+    fn update_ui_job_progress(&mut self, job_id: &str, metadata: JobMetadata, outputs: Option<JobOutputs>) {
+        use surrealdb_types::RecordIdKey;
+
+        // Find the job in the UI state and update it in-place
+        for job in self.ui.ui_ctx.jobs.iter_mut() {
+            let matches = match &job.id.key {
+                RecordIdKey::String(id) => id == job_id,
+                _ => false
+            };
+
+            if matches {
+                // Update the job data directly
+                job.metadata = metadata;
+                if let Some(new_outputs) = outputs {
+                    job.outputs = Some(new_outputs);
+                }
+                return;
+            }
+        }
+    }
+
+    /// Load a scene by job ID
+    async fn load_scene_by_id(&mut self, id: surrealdb_types::RecordId) -> anyhow::Result<()> {
+        let jobs = self.generator.get_jobs().await?;
+
+        if let Some(job) = jobs.iter().find(|j| j.id == id) {
+            if let Some(ref outputs) = job.outputs {
+                self.load_scene_from_path(&outputs.ply_path).await?;
+                self.ui.ui_ctx.current_job_id = Some(id);
+            } else {
+                println!("Job has no outputs yet");
+            }
+        } else {
+            println!("Job not found: {:?}", id);
+        }
+
+        Ok(())
+    }
+
+    /// Load a scene from a PLY file path
+    async fn load_scene_from_path(&mut self, ply_path: &str) -> anyhow::Result<()> {
+        println!("Loading scene from: {}", ply_path);
+
+        // Convert relative path to absolute
+        let path = std::env::current_dir()?.join(ply_path);
+
+        if !path.exists() {
+            anyhow::bail!("PLY file not found: {}", path.display());
+        }
+
+        // Load Gaussian cloud from PLY
+        let cloud = GaussianCloud::from_ply(&path)?;
+        println!("Loaded {} Gaussians from {}", cloud.count, path.display());
+
+        // Load into renderer
+        self.load_gaussian_cloud(cloud);
+
+        self.push_event(AppEvent::SceneReady);
 
         Ok(())
     }

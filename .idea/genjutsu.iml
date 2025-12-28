@@ -17,6 +17,7 @@
       <sourceFolder url="file://$MODULE_DIR$/crates/gj-splat/examples" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/crates/gj-splat/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/crates/gj-app/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/python/shap-e" isTestSource="false" />
       <excludeFolder url="file://$MODULE_DIR$/crates/app/target" />
       <excludeFolder url="file://$MODULE_DIR$/crates/diffusion/target" />
       <excludeFolder url="file://$MODULE_DIR$/target" />

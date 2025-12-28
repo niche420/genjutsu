@@ -3,3 +3,4 @@ uvicorn[standard]==0.34.0
 pydantic==2.10.3
 celery==5.4.0
 redis==5.2.1
+requests>=2.32.5
