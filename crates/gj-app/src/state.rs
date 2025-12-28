@@ -96,31 +96,124 @@ impl AppState {
 
         println!("Loaded {} jobs from database", jobs.len());
 
-        // Clean up any jobs stuck in GENERATING or QUEUED state
-        // (they were interrupted when the app closed)
+        // Clean up jobs that were interrupted
         for job in &mut jobs {
             match job.metadata.status {
                 JobStatus::GENERATING | JobStatus::QUEUED => {
-                    println!("Cleaning up stale job: {:?} (was {:?})", job.id, job.metadata.status);
+                    // Check if outputs actually exist on disk
+                    let found_output_path = self.generator.db.verify_outputs(job);
 
-                    // Mark as failed due to interruption
-                    let mut updated_metadata = job.metadata.clone();
-                    updated_metadata.status = JobStatus::FAILED;
-                    updated_metadata.error = Some("Job interrupted by application shutdown".to_string());
-                    updated_metadata.completed_at = Some(SurrealDatetime::from(chrono::Utc::now()));
-                    updated_metadata.updated_at = SurrealDatetime::from(chrono::Utc::now());
+                    if let Some(ply_path) = found_output_path {
+                        // Job was actually completed, just didn't update DB before shutdown
+                        println!(
+                            "Job {:?} has outputs at '{}' but status is {:?} - marking as COMPLETE",
+                            job.id, ply_path, job.metadata.status
+                        );
 
-                    // Update in database using RecordId directly
-                    self.generator.update_job_status_by_id(
-                        job.id.clone(),
-                        updated_metadata.clone(),
-                        None
-                    ).await?;
+                        let mut updated_metadata = job.metadata.clone();
+                        updated_metadata.status = JobStatus::COMPLETE;
+                        updated_metadata.progress = 1.0;
+                        updated_metadata.message = Some("Generation complete".to_string());
+                        updated_metadata.error = None;
+                        updated_metadata.completed_at = Some(chrono::Utc::now().into());
+                        updated_metadata.updated_at = chrono::Utc::now().into();
 
-                    // Update local copy
-                    job.metadata = updated_metadata;
+                        // Create outputs with the found path
+                        let outputs = Some(JobOutputs { ply_path });
+
+                        // Update in database using RecordId directly
+                        self.generator.update_job_status_by_id(
+                            job.id.clone(),
+                            updated_metadata.clone(),
+                            outputs.clone()
+                        ).await?;
+
+                        // Update local copy
+                        job.metadata = updated_metadata;
+                        job.outputs = outputs;
+
+                        println!("  ✓ Marked as COMPLETE with recovered output path");
+                    } else {
+                        // Job was genuinely interrupted - no outputs found
+                        println!(
+                            "Cleaning up stale job: {:?} (was {:?}, no outputs found)",
+                            job.id, job.metadata.status
+                        );
+
+                        let mut updated_metadata = job.metadata.clone();
+                        updated_metadata.status = JobStatus::FAILED;
+                        updated_metadata.error = Some("Job interrupted by application shutdown".to_string());
+                        updated_metadata.message = None;
+                        updated_metadata.completed_at = Some(chrono::Utc::now().into());
+                        updated_metadata.updated_at = chrono::Utc::now().into();
+
+                        // Update in database using RecordId directly
+                        self.generator.update_job_status_by_id(
+                            job.id.clone(),
+                            updated_metadata.clone(),
+                            None
+                        ).await?;
+
+                        // Update local copy
+                        job.metadata = updated_metadata;
+                        job.outputs = None;
+
+                        println!("  ✓ Marked as FAILED");
+                    }
                 }
-                _ => {}
+                JobStatus::COMPLETE => {
+                    // Verify outputs still exist
+                    let found_output_path = self.generator.db.verify_outputs(job);
+
+                    if found_output_path.is_none() {
+                        println!(
+                            "Job {:?} marked COMPLETE but outputs missing - marking as FAILED",
+                            job.id
+                        );
+
+                        let mut updated_metadata = job.metadata.clone();
+                        updated_metadata.status = JobStatus::FAILED;
+                        updated_metadata.error = Some("Output file was deleted or moved".to_string());
+                        updated_metadata.updated_at = chrono::Utc::now().into();
+
+                        // Update in database
+                        self.generator.update_job_status_by_id(
+                            job.id.clone(),
+                            updated_metadata.clone(),
+                            None
+                        ).await?;
+
+                        // Update local copy and clear outputs
+                        job.metadata = updated_metadata;
+                        job.outputs = None;
+
+                        println!("  ✓ Marked as FAILED (missing outputs)");
+                    } else if job.outputs.is_none() && found_output_path.is_some() {
+                        // Job is COMPLETE but outputs field is empty - fix it
+                        println!(
+                            "Job {:?} is COMPLETE but missing outputs field - repairing",
+                            job.id
+                        );
+
+                        let ply_path = found_output_path.unwrap();
+                        let outputs = Some(JobOutputs { ply_path });
+
+                        // Update in database
+                        self.generator.update_job_status_by_id(
+                            job.id.clone(),
+                            job.metadata.clone(),
+                            outputs.clone()
+                        ).await?;
+
+                        // Update local copy
+                        job.outputs = outputs;
+
+                        println!("  ✓ Repaired outputs field");
+                    }
+                }
+                _ => {
+                    // FAILED jobs are fine as-is
+                }
             }
         }
 
@@ -345,9 +438,6 @@ impl AppState {
     pub async fn on_gen_event(&mut self, event: GenEvent) -> anyhow::Result<()> {
         match event {
             GenEvent::JobStatus { id, data, outputs } => {
-                info!("Job status update: {} - {:?}", id, data.status);
-
-                // IMPORTANT: Only write to database for terminal states
                 match data.status {
                     JobStatus::COMPLETE | JobStatus::FAILED => {
                         // Terminal state - persist to database
@@ -362,28 +452,32 @@ impl AppState {
                         // Auto-load if complete
                         if data.status == JobStatus::COMPLETE {
                             if let Some(ref job_outputs) = outputs {
-                                info!("Job complete! PLY at: {}", job_outputs.ply_path);
                                 self.load_scene_from_path(&job_outputs.ply_path).await?;
                             }
                         }
                     }
                     JobStatus::GENERATING => {
-                        // First GENERATING update - write to DB to mark job as started
-                        if !self.active_job_progress.contains_key(&id) {
+                        // Check if this is the first GENERATING update
+                        let is_first = !self.active_job_progress.contains_key(&id);
+
+                        if is_first {
+                            // First GENERATING - write to DB to mark as started
                             self.generator.update_job_status(id.clone(), data.clone(), outputs.clone()).await?;
                             self.load_jobs().await?;
                         }
 
-                        // All subsequent updates - memory cache only
-                        self.active_job_progress.insert(id.clone(), (data, outputs));
+                        // Update in-memory cache (for all GENERATING updates)
+                        self.active_job_progress.insert(id.clone(), (data.clone(), outputs.clone()));
 
-                        // Update UI directly without hitting database
-                        self.update_ui_job_progress(id.clone(), self.active_job_progress.get(&id).unwrap().clone());
+                        // Update UI immediately (don't wait for DB)
+                        self.update_ui_job_progress(&id, data, outputs);
                     }
                     JobStatus::QUEUED => {
-                        // Queued state is already written when job is submitted
-                        // Just update UI cache
-                        self.active_job_progress.insert(id.clone(), (data, outputs));
+                        // Update memory cache
+                        self.active_job_progress.insert(id.clone(), (data.clone(), outputs.clone()));
+
+                        // Update UI
+                        self.update_ui_job_progress(&id, data, outputs);
                     }
                 }
             }
@@ -392,18 +486,24 @@ impl AppState {
         Ok(())
     }
 
-    fn update_ui_job_progress(&mut self, job_id: String, data: (JobMetadata, Option<JobOutputs>)) {
+    /// Update a job's progress in the UI state directly
+    fn update_ui_job_progress(&mut self, job_id: &str, metadata: JobMetadata, outputs: Option<JobOutputs>) {
+        use surrealdb_types::RecordIdKey;
+
         // Find the job in the UI state and update it in-place
-        if let Some(job) = self.ui.ui_ctx.jobs.iter_mut().find(|j| {
-            // Extract the ID part from RecordId for comparison
-            match &j.id.key {
-                RecordIdKey::String(id) => *id == job_id,
+        for job in self.ui.ui_ctx.jobs.iter_mut() {
+            let matches = match &job.id.key {
+                RecordIdKey::String(id) => id == job_id,
                 _ => false
-            }
-        }) {
-            job.metadata = data.0;
-            if let Some(outputs) = data.1 {
-                job.outputs = Some(outputs);
+            };
+
+            if matches {
+                // Update the job data directly
+                job.metadata = metadata;
+                if let Some(new_outputs) = outputs {
+                    job.outputs = Some(new_outputs);
+                }
+                return;
             }
         }
     }

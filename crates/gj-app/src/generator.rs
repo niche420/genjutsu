@@ -1,3 +1,4 @@
+// Update for crates/gj-app/src/generator.rs
 use std::sync::Arc;
 use chrono::Utc;
 use surrealdb_types::RecordId;
@@ -15,7 +16,7 @@ pub mod db;
 
 pub struct Generator {
     backend: GenBackend,
-    db: JobDatabase,
+    pub db: JobDatabase,  // Made public for verify_outputs access
     event_loop_proxy: Arc<EventLoopProxy<GjEvent>>,
 }
 

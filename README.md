@@ -8,17 +8,16 @@ A desktop app for generating interactive 3D scenes from text prompts using Gauss
 
 ![demo.png](screenshots/demo.png)
 
-## 🎯 Features
+## Features
 
-- ** Text-to-3D Generation**: Create 3D models from text descriptions using Shap-E (~30-60 seconds)
-- ** Real-time Gaussian Splatting**: High-performance 3D rendering using WebGPU
-- ** Interactive Camera Controls**: Smooth rotation, zoom, and pan
+- ** Text-to-3D Generation**: Create 3D models from text descriptions using Shap-E
+- ** Real-time Gaussian Splatting**: 3D rendering using WebGPU
 - ** Asynchronous Processing**: Non-blocking generation with live progress updates
 - ** Cross-platform**: Works on Windows, macOS, and Linux
 - ** Docker Support**: Easy deployment with Docker Compose
-- ** Job Queue System**: Redis + Celery for robust task management
+- ** Job Queue System**: Redis + Celery for robust task management + SurrealDB for storage
 
-## 🚀 Quick Start
+## Quick Start
 
 ### Prerequisites
 
@@ -51,12 +50,12 @@ cargo build --release
 cargo run --release
 ```
 
-## 📖 Usage
+## Usage
 
 ### Text-to-3D Generation
 
 1. Enter a text prompt in the sidebar (e.g., "a red sports car")
-2. Click "🎨 Generate 3D Model"
+2. Click "Generate 3D Model"
 3. Wait for generation to complete (~60-90 seconds)
 4. Interact with the generated 3D model
 
@@ -72,7 +71,7 @@ cargo run --release
 
 - **Rotate**: Left-click and drag
 - **Zoom**: Mouse wheel
-- **Reset**: Click "🔄 Reset Camera" button
+- **Reset**: Click "Reset Camera" button
 
 ### Shap-E Settings
 
@@ -83,7 +82,7 @@ DEFAULT_GUIDANCE_SCALE = 15.0       # Higher = more prompt adherence
 DEFAULT_NUM_INFERENCE_STEPS = 64    # More steps = better quality
 ```
 
-## 🐛 Troubleshooting
+## Troubleshooting
 
 ### Services won't start
 
@@ -144,7 +143,7 @@ curl http://localhost:5000/health
 docker-compose logs api
 ```
 
-## 🎓 Technical Details
+## Technical Details
 
 ### Gaussian Splatting
 
@@ -180,7 +179,7 @@ Each Gaussian is rendered as a textured quad with Gaussian falloff, blended usin
 
 This ensures the UI remains responsive during generation.
 
-## 📝 API Documentation
+## API Documentation
 
 Once services are running, visit:
 - **Swagger UI**: http://localhost:5000/docs
@@ -208,21 +207,19 @@ GET /status/{job_id}
 GET /workers
 ```
 
-## 🤝 Contributing
+## Contributing
 
 I don't care what you do with this.
 
-## 🙏 Acknowledgments
+## Shoutouts
 
 - **Shap-E**: OpenAI's text-to-3D model ([Paper](https://arxiv.org/abs/2305.02463))
 - **3D Gaussian Splatting**: Original rendering technique ([Paper](https://repo-sam.inria.fr/fungraph/3d-gaussian-splatting/))
 - **egui**: Immediate mode GUI framework
 - **wgpu**: WebGPU implementation in Rust
 
-## ⚠️ Known Limitations
+## Known Limitations
 
-- Shap-E works best for **single objects**, not complex scenes
-- Quality depends heavily on prompt clarity
-- Generation time: ~30-60 seconds per object
-- Best results with concrete, describable objects
-- Abstract concepts may produce unexpected results
+- Job queue system not fully fleshed out
+- Large variance in wait times
+- Splats are hella wonky and can lead to artifacts that resemble gouraud shading

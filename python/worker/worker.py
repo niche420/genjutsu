@@ -45,7 +45,7 @@ print()
 RUST_CALLBACK_URL = os.getenv('RUST_CALLBACK_URL', 'http://host.docker.internal:3000')
 
 
-def notify_rust_only(job_id: str, metadata: dict, outputs: dict = None):
+def notify_rust_backend(job_id: str, metadata: dict, outputs: dict = None):
     """Send status update to Rust app for UI display"""
     try:
         payload = {
@@ -57,12 +57,14 @@ def notify_rust_only(job_id: str, metadata: dict, outputs: dict = None):
         response = requests.post(
             f"{RUST_CALLBACK_URL}/job/{job_id}/progress",
             json=payload,
-            timeout=5
+            timeout=2
         )
 
         if response.status_code != 200:
             print(f"Warning: Callback failed with status {response.status_code}")
 
+    except requests.exceptions.Timeout:
+        print(f"Warning: Callback timeout (Rust backend may be slow)")
     except requests.exceptions.RequestException as e:
         print(f"Warning: Failed to notify Rust app: {e}")
 
@@ -76,7 +78,7 @@ def generate_3d(self, prompt: str, model_name: str, guidance_scale: float, num_i
         # Check model exists
         if model_name not in MODELS:
             error_msg = f"Model '{model_name}' not available"
-            notify_rust_only(
+            notify_rust_backend(
                 job_id,
                 metadata={
                     "status": JobStatus.FAILED.value,
@@ -112,8 +114,8 @@ def generate_3d(self, prompt: str, model_name: str, guidance_scale: float, num_i
         # Small delay to ensure DB insert has completed on Rust side
         time.sleep(0.5)
 
-        # Initial status - mark as started (this will trigger DB write on Rust side)
-        notify_rust_only(
+        # Initial status - mark as started
+        notify_rust_backend(
             job_id,
             metadata={
                 "status": JobStatus.GENERATING.value,
@@ -126,20 +128,32 @@ def generate_3d(self, prompt: str, model_name: str, guidance_scale: float, num_i
             }
         )
 
-        # Progress callback - updates Rust UI in real-time
+        # Track last update time to throttle notifications
+        last_update_time = time.time()
+        update_interval = 0.5  # Send update every 0.5 seconds minimum
+
+        # Progress callback - updates Rust UI frequently
         def progress_callback(progress: float, message: str):
-            notify_rust_only(
-                job_id,
-                metadata={
-                    "status": JobStatus.GENERATING.value,
-                    "progress": progress,
-                    "message": message,
-                    "error": None,
-                    "created_at": datetime.utcnow().isoformat() + 'Z',
-                    "updated_at": datetime.utcnow().isoformat() + 'Z',
-                    "completed_at": None
-                }
-            )
+            nonlocal last_update_time
+
+            current_time = time.time()
+
+            # Send update if enough time has passed OR if it's a significant progress jump
+            if (current_time - last_update_time >= update_interval):
+                notify_rust_backend(
+                    job_id,
+                    metadata={
+                        "status": JobStatus.GENERATING.value,
+                        "progress": progress,
+                        "message": message,
+                        "error": None,
+                        "created_at": datetime.utcnow().isoformat() + 'Z',
+                        "updated_at": datetime.utcnow().isoformat() + 'Z',
+                        "completed_at": None
+                    }
+                )
+                last_update_time = current_time
+
             print(f"[{progress*100:.0f}%] {message}")
 
         # Generate with progress tracking
@@ -147,7 +161,7 @@ def generate_3d(self, prompt: str, model_name: str, guidance_scale: float, num_i
             result_path = model.generate(
                 prompt,
                 output_path,
-                progress_callback=progress_callback,  # Pass callback to model
+                progress_callback=progress_callback,
                 guidance_scale=guidance_scale,
                 num_inference_steps=num_inference_steps
             )
@@ -162,7 +176,7 @@ def generate_3d(self, prompt: str, model_name: str, guidance_scale: float, num_i
             error_msg = str(e)
 
             # Job failed
-            notify_rust_only(
+            notify_rust_backend(
                 job_id,
                 metadata={
                     "status": JobStatus.FAILED.value,
@@ -181,7 +195,7 @@ def generate_3d(self, prompt: str, model_name: str, guidance_scale: float, num_i
         print(f"Relative path for Rust: {relative_path}")
 
         # Job completed successfully
-        notify_rust_only(
+        notify_rust_backend(
             job_id,
             metadata={
                 "status": JobStatus.COMPLETE.value,
@@ -206,7 +220,7 @@ def generate_3d(self, prompt: str, model_name: str, guidance_scale: float, num_i
         print(f"\n✗ Job failed: {error_msg}\n")
 
         # Unexpected failure
-        notify_rust_only(
+        notify_rust_backend(
             job_id,
             metadata={
                 "status": JobStatus.FAILED.value,

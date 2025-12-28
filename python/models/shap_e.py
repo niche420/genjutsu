@@ -66,22 +66,23 @@ class ShapEModel(Model3DBase):
         def update_progress(progress: float, message: str):
             if progress_callback:
                 progress_callback(progress, message)
-            print(f"  [{progress*100:.0f}%] {message}")
 
         print(f"  Generating with Shap-E: '{prompt}'")
         print(f"  Guidance scale: {guidance_scale}")
         print(f"  Inference steps: {num_inference_steps}")
 
+        update_progress(0.05, "Starting generation...")
+        update_progress(0.10, "Loading prompt encoder...")
         update_progress(0.15, "Generating latent representation...")
 
-        # Create a custom progress wrapper for the sampling
+        # Custom progress wrapper that sends updates for each diffusion step
         class ProgressWrapper:
             def __init__(self, callback, total_steps):
                 self.callback = callback
                 self.total_steps = total_steps
                 self.current_step = 0
 
-            def __call__(self, *args, **kwargs):
+            def __call__(self, sample_dict=None):
                 self.current_step += 1
                 # Map steps 0-num_inference_steps to progress 0.15-0.75
                 progress = 0.15 + (0.60 * self.current_step / self.total_steps)
@@ -96,7 +97,7 @@ class ShapEModel(Model3DBase):
             diffusion=self.diffusion_from_config(self.load_config('diffusion')),
             guidance_scale=guidance_scale,
             model_kwargs=dict(texts=[prompt]),
-            progress=True,
+            progress=progress_wrapper,  # Pass our progress wrapper
             clip_denoised=True,
             use_fp16=True,
             use_karras=True,
@@ -132,9 +133,10 @@ class ShapEModel(Model3DBase):
                 "  • Different prompt entirely"
             )
 
-        update_progress(0.90, "Converting to Gaussian splats...")
+        update_progress(0.85, "Converting to Gaussian splats...")
         self._export_to_ply(mesh, output_path)
 
+        update_progress(0.95, "Finalizing...")
         update_progress(1.0, "Generation complete!")
         print(f"  ✓ Saved to {output_path}")
         return output_path

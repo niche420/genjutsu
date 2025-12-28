@@ -21,4 +21,7 @@ pub enum Error {
 
     #[error("Render error: {0}")]
     RenderError(String),
+
+    #[error("Surreal Error: {0}")]
+    SurrealError(String)
 }

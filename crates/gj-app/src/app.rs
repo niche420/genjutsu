@@ -45,6 +45,8 @@ impl ApplicationHandler<GjEvent> for App {
             match event {
                 GjEvent::Ui(e) => {
                     state.on_ui_event(e);
+                    self.needs_redraw = true;
+                    state.window.request_redraw();
                 }
                 GjEvent::App(e) => {
                     pollster::block_on(async {
@@ -60,6 +62,7 @@ impl ApplicationHandler<GjEvent> for App {
                             eprintln!("Error handling gen event: {}", e);
                         }
                     });
+                    // Force immediate redraw for progress updates
                     self.needs_redraw = true;
                     state.window.request_redraw();
                 }

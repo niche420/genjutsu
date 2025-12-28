@@ -1,15 +1,47 @@
-use serde_json::Value;
+// Replace crates/gj-app/src/job.rs
+
 use std::fmt;
 use serde::{Deserialize, Serialize};
-use surrealdb_types::SurrealValue;
+use surrealdb_types::{SurrealValue, Value, Kind};
+use gj_core::error::Error;
 use crate::generator::db::job::SurrealDatetime;
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, SurrealValue)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "UPPERCASE")]
 pub enum JobStatus {
     QUEUED,
     GENERATING,
     COMPLETE,
     FAILED,
+}
+
+impl SurrealValue for JobStatus {
+    fn kind_of() -> surrealdb_types::Kind {
+        surrealdb_types::Kind::String
+    }
+
+    fn into_value(self) -> surrealdb_types::Value {
+        let s = match self {
+            JobStatus::QUEUED => "QUEUED",
+            JobStatus::GENERATING => "GENERATING",
+            JobStatus::COMPLETE => "COMPLETE",
+            JobStatus::FAILED => "FAILED",
+        };
+        surrealdb_types::Value::String(String::from(s))
+    }
+
+    fn from_value(value: Value) -> anyhow::Result<Self> {
+        match value {
+            Value::String(s) => match s.as_str() {
+                "QUEUED" => Ok(JobStatus::QUEUED),
+                "GENERATING" => Ok(JobStatus::GENERATING),
+                "COMPLETE" => Ok(JobStatus::COMPLETE),
+                "FAILED" => Ok(JobStatus::FAILED),
+                _ => Err(anyhow::Error::from(Error::SurrealError(format!("Invalid JobStatus type: {}", s)))),
+            },
+            _ => Err(anyhow::Error::from(Error::SurrealError("Expected string for JobStatus".to_string()))),
+        }
+    }
 }
 
 impl JobStatus {
