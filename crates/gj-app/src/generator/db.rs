@@ -79,26 +79,6 @@ impl JobDatabase {
         Ok(())
     }
 
-    pub async fn update_status(
-        &self,
-        job_id: String,
-        status: JobStatus,
-        progress: f32,
-        message: Option<String>,
-    ) -> Result<()> {
-        let _: Option<JobRecord> = self.db
-            .update((JOBS, job_id))
-            .merge(serde_json::json!({
-                "metadata.status": status,
-                "metadata.progress": progress,
-                "metadata.message": message,
-                "metadata.updated_at": chrono::Utc::now(),
-            }))
-            .await?;
-
-        Ok(())
-    }
-
     /// Mark job as complete with result path
     pub async fn complete_job(&self, job_id: String, ply_path: PathBuf) -> Result<()> {
         let _: Option<JobRecord> = self.db

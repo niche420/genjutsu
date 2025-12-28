@@ -3,28 +3,19 @@ use async_trait::async_trait;
 use chrono::Utc;
 use egui::{Context, RichText, TextEdit, Color32};
 use gj_core::Model3D;
-use gj_splat::camera::Camera;
 use crate::events::{AppEvent, GjEvent};
 use crate::ui::{UiComponent, UiContext, UiEvent};
 
 pub struct SidePanel {
     pub selected_model: Model3D,
-    pub last_status: Option<String>,
     pub prompt_text: String,
-    pub is_generating: bool,
-    pub progress: f32,
-    pub active_jobs: usize,
 }
 
 impl Default for SidePanel {
     fn default() -> Self {
         Self {
             selected_model: Model3D::ShapE,
-            last_status: None,
             prompt_text: String::new(),
-            is_generating: false,
-            progress: 0f32,
-            active_jobs: 0,
         }
     }
 }
@@ -75,44 +66,6 @@ impl UiComponent for SidePanel {
                         model: self.selected_model,
                     });
                     self.prompt_text.clear();  // Clear after adding to queue
-                }
-
-                ui.add_space(5.0);
-
-                if self.active_jobs > 0 {
-                    ui.separator();
-
-                    egui::Frame::none()
-                        .fill(egui::Color32::from_rgb(30, 50, 80))
-                        .inner_margin(10.0)
-                        .rounding(5.0)
-                        .show(ui, |ui| {
-                            ui.horizontal(|ui| {
-                                ui.spinner();
-                                ui.heading("⚡ Generating...");
-                            });
-
-                            if let Some(ref msg) = self.last_status {
-                                ui.label(
-                                    RichText::new(msg)
-                                        .color(Color32::LIGHT_BLUE)
-                                );
-                            }
-
-                            ui.add(
-                                egui::ProgressBar::new(self.progress)
-                                    .show_percentage()
-                                    .animate(true)
-                            );
-
-                            if self.active_jobs > 1 {
-                                ui.label(
-                                    RichText::new(format!("+{} more in queue", self.active_jobs - 1))
-                                        .small()
-                                        .color(Color32::GRAY)
-                                );
-                            }
-                        });
                 }
 
                 ui.separator();
@@ -174,28 +127,7 @@ impl UiComponent for SidePanel {
                     ui.label("Renderer: Gaussian Splatting");
                     ui.label("Backend: WebGPU (wgpu)");
                     ui.label("Generation: ~30-60 seconds");
-                    ui.label(format!("Active jobs: {}", self.active_jobs));
                 });
             });
-    }
-
-    async fn on_app_event(&mut self, ev: AppEvent) {
-        match ev {
-            AppEvent::JobQueued(_) => {
-                self.active_jobs += 1;
-            }
-            AppEvent::JobProgress { progress, message, .. } => {
-                self.progress = progress;
-                self.last_status = Some(message.clone());
-            }
-            AppEvent::JobComplete(_) | AppEvent::JobFailed { .. } => {
-                self.active_jobs = self.active_jobs.saturating_sub(1);
-                if self.active_jobs == 0 {
-                    self.progress = 0.0;
-                    self.last_status = None;
-                }
-            }
-            _ => {}
-        }
     }
 }

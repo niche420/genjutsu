@@ -11,9 +11,7 @@ impl UiComponent for TopPanel {
     fn show(&mut self, ctx: &Context, ui_ctx: &UiContext) {
         egui::TopBottomPanel::top("top_panel").show(ctx, |ui| {
             ui.horizontal(|ui| {
-                ui.heading("🎨 genjutsu");
-                ui.separator();
-                ui.label(RichText::new("Status:").color(Color32::LIGHT_BLUE));
+                ui.heading("\"Don't play with them spoons, I ain't Lovato\" - 2slimey");
             });
         });
     }

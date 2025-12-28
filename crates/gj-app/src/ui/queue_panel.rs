@@ -9,7 +9,6 @@ use crate::ui::{UiComponent, UiContext, UiEvent};
 
 #[derive(Default)]
 pub struct QueuePanel {
-    show_panel: bool,
     show_completed: bool,
 }
 
@@ -121,14 +120,6 @@ impl QueuePanel {
 #[async_trait]
 impl UiComponent for QueuePanel {
     fn show(&mut self, ctx: &Context, ui_ctx: &UiContext) {
-        if !self.show_panel && !ui_ctx.jobs.is_empty() {
-            self.show_panel = true;
-        }
-
-        if !self.show_panel {
-            return;
-        }
-
         egui::TopBottomPanel::bottom("queue_panel")
             .resizable(true)
             .min_height(100.0)
@@ -199,14 +190,5 @@ impl UiComponent for QueuePanel {
                         }
                     });
             });
-    }
-
-    async fn on_app_event(&mut self, ev: AppEvent) {
-        match ev {
-            AppEvent::JobQueued(job) => {
-                self.show_panel = true;
-            }
-            _ => {}
-        }
     }
 }

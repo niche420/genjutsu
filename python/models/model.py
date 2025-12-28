@@ -1,5 +1,6 @@
 from abc import ABC, abstractmethod
 from pathlib import Path
+from typing import Callable, Optional
 
 
 class Model3DBase(ABC):
@@ -15,13 +16,20 @@ class Model3DBase(ABC):
         pass
 
     @abstractmethod
-    def generate(self, prompt: str, output_path: Path, **kwargs) -> Path:
+    def generate(
+            self,
+            prompt: str,
+            output_path: Path,
+            progress_callback: Optional[Callable[[float, str], None]] = None,
+            **kwargs
+    ) -> Path:
         """
         Generate 3D content from prompt.
 
         Args:
             prompt: Text description or image path
             output_path: Where to save .ply file
+            progress_callback: Optional callback(progress: float, message: str) for progress updates
             **kwargs: Model-specific parameters
 
         Returns:

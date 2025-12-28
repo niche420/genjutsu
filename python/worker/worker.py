@@ -5,6 +5,7 @@ import sys
 from pathlib import Path
 from datetime import datetime
 import os
+import time
 
 import requests
 
@@ -40,15 +41,12 @@ print(f"Loaded {len(MODELS)} model(s)")
 print("=" * 60)
 print()
 
-# Rust backend callback URL (using host.docker.internal from docker-compose)
+# Rust backend callback URL
 RUST_CALLBACK_URL = os.getenv('RUST_CALLBACK_URL', 'http://host.docker.internal:3000')
 
 
 def notify_rust_only(job_id: str, metadata: dict, outputs: dict = None):
-    """Send status update to Rust app for UI display (no DB write)
-
-    This just updates the UI state, not the persistent database.
-    """
+    """Send status update to Rust app for UI display"""
     try:
         payload = {
             "id": job_id,
@@ -71,23 +69,13 @@ def notify_rust_only(job_id: str, metadata: dict, outputs: dict = None):
 
 @celery_app.task(name='worker.generate_3d', bind=True)
 def generate_3d(self, prompt: str, model_name: str, guidance_scale: float, num_inference_steps: int):
-    """
-    Generate 3D model from text prompt
-
-    Database updates only happen at:
-    - Job start (GENERATING)
-    - Job completion (COMPLETE with outputs)
-    - Job failure (FAILED with error)
-
-    Progress updates go directly to Rust app for UI only.
-    """
+    """Generate 3D model from text prompt"""
     job_id = self.request.id
 
     try:
         # Check model exists
         if model_name not in MODELS:
             error_msg = f"Model '{model_name}' not available"
-            # This updates DB via Rust
             notify_rust_only(
                 job_id,
                 metadata={
@@ -121,7 +109,10 @@ def generate_3d(self, prompt: str, model_name: str, guidance_scale: float, num_i
         print(f"Steps: {num_inference_steps}")
         print(f"{'='*60}\n")
 
-        # DB UPDATE #1: Job started
+        # Small delay to ensure DB insert has completed on Rust side
+        time.sleep(0.5)
+
+        # Initial status - mark as started (this will trigger DB write on Rust side)
         notify_rust_only(
             job_id,
             metadata={
@@ -135,7 +126,7 @@ def generate_3d(self, prompt: str, model_name: str, guidance_scale: float, num_i
             }
         )
 
-        # Progress callback - ONLY updates Rust UI, NOT database
+        # Progress callback - updates Rust UI in real-time
         def progress_callback(progress: float, message: str):
             notify_rust_only(
                 job_id,
@@ -151,13 +142,12 @@ def generate_3d(self, prompt: str, model_name: str, guidance_scale: float, num_i
             )
             print(f"[{progress*100:.0f}%] {message}")
 
-        progress_callback(0.1, 'Starting generation...')
-
-        # Generate
+        # Generate with progress tracking
         try:
             result_path = model.generate(
                 prompt,
                 output_path,
+                progress_callback=progress_callback,  # Pass callback to model
                 guidance_scale=guidance_scale,
                 num_inference_steps=num_inference_steps
             )
@@ -169,17 +159,9 @@ def generate_3d(self, prompt: str, model_name: str, guidance_scale: float, num_i
             print(f"\n✓ Generation complete: {result_path}")
 
         except ValueError as e:
-            # Generation failed
             error_msg = str(e)
-            if "flat" in error_msg.lower() or "degenerate" in error_msg.lower():
-                error_msg = (
-                    f"Generated mesh is flat/invalid. Try:\n"
-                    f"  • More specific prompt (add details about shape/structure)\n"
-                    f"  • Higher guidance scale (try 20-25)\n"
-                    f"  • Different prompt entirely"
-                )
 
-            # DB UPDATE #2: Job failed
+            # Job failed
             notify_rust_only(
                 job_id,
                 metadata={
@@ -192,14 +174,13 @@ def generate_3d(self, prompt: str, model_name: str, guidance_scale: float, num_i
                     "completed_at": datetime.utcnow().isoformat() + 'Z'
                 }
             )
-            raise ValueError(error_msg)
+            raise
 
         # Get relative path for Rust app
         relative_path = str(result_path.relative_to(OUTPUT_DIR.parent))
-
         print(f"Relative path for Rust: {relative_path}")
 
-        # DB UPDATE #3: Job completed successfully
+        # Job completed successfully
         notify_rust_only(
             job_id,
             metadata={
@@ -224,7 +205,7 @@ def generate_3d(self, prompt: str, model_name: str, guidance_scale: float, num_i
         error_msg = str(e)
         print(f"\n✗ Job failed: {error_msg}\n")
 
-        # DB UPDATE #4: Unexpected failure
+        # Unexpected failure
         notify_rust_only(
             job_id,
             metadata={
@@ -241,10 +222,9 @@ def generate_3d(self, prompt: str, model_name: str, guidance_scale: float, num_i
 
 
 if __name__ == '__main__':
-    # Start worker
     celery_app.worker_main([
         'worker',
         '--loglevel=info',
-        '--concurrency=1',  # Single worker (GPU)
-        '--pool=solo'  # Use solo pool for GPU work
+        '--concurrency=1',
+        '--pool=solo'
     ])

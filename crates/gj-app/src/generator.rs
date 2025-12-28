@@ -4,7 +4,7 @@ use surrealdb_types::RecordId;
 use winit::event_loop::EventLoopProxy;
 use gj_core::Model3D;
 use db::job::JobRecord;
-use crate::events::GjEvent;
+use crate::events::{AppEvent, GjEvent};
 use crate::generator::backend::GenBackend;
 use crate::generator::db::job::SurrealDatetime;
 use crate::generator::db::JobDatabase;
@@ -16,18 +16,20 @@ pub mod db;
 pub struct Generator {
     backend: GenBackend,
     db: JobDatabase,
+    event_loop_proxy: Arc<EventLoopProxy<GjEvent>>,
 }
 
 impl Generator {
     pub async fn new(event_loop_proxy: Arc<EventLoopProxy<GjEvent>>) -> anyhow::Result<Self> {
-        let backend = GenBackend::new(event_loop_proxy).await?;
+        let backend = GenBackend::new(event_loop_proxy.clone()).await?;
 
         let db_path = std::env::current_dir()?.join("outputs/db");
         let db = JobDatabase::new(db_path).await?;
 
         Ok(Self {
             backend,
-            db
+            db,
+            event_loop_proxy
         })
     }
 
@@ -51,7 +53,12 @@ impl Generator {
             },
             outputs: None
         };
-        self.db.insert_job(resp.id, job).await?;
+        let job_record = self.db.insert_job(resp.id, job).await?;
+
+        // Emit JobQueued event so UI updates
+        if let Some(record) = job_record {
+            self.event_loop_proxy.send_event(GjEvent::App(AppEvent::JobQueued(record)))?;
+        }
 
         Ok(())
     }

@@ -108,6 +108,12 @@ impl UiState {
     pub fn set_jobs(&mut self, jobs: Vec<JobRecord>) {
         self.ui_ctx.jobs = jobs;
     }
+
+    pub async fn on_app_event(&mut self, e: AppEvent) {
+        for component in self.components.iter_mut() {
+            component.on_app_event(e.clone()).await;
+        }
+    }
 }
 
 #[async_trait]

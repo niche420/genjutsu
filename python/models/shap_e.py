@@ -6,7 +6,7 @@ Fast inference (~1 minute) with high-quality Gaussian splat output
 import torch
 import numpy as np
 from pathlib import Path
-from PIL import Image
+from typing import Callable, Optional
 
 from .model import Model3DBase
 
@@ -53,7 +53,9 @@ class ShapEModel(Model3DBase):
             print(f"  → Make sure you installed: pip install git+https://github.com/openai/shap-e.git")
             return False
 
-    def generate(self, prompt: str, output_path: Path, **kwargs) -> Path:
+    def generate(self, prompt: str, output_path: Path,
+                 progress_callback: Optional[Callable[[float, str], None]] = None,
+                 **kwargs) -> Path:
         """Generate 3D Gaussians from text prompt"""
         if not self.is_loaded:
             raise RuntimeError("Shap-E not loaded")
@@ -61,12 +63,33 @@ class ShapEModel(Model3DBase):
         guidance_scale = kwargs.get('guidance_scale', 15.0)
         num_inference_steps = kwargs.get('num_inference_steps', 64)
 
+        def update_progress(progress: float, message: str):
+            if progress_callback:
+                progress_callback(progress, message)
+            print(f"  [{progress*100:.0f}%] {message}")
+
         print(f"  Generating with Shap-E: '{prompt}'")
         print(f"  Guidance scale: {guidance_scale}")
         print(f"  Inference steps: {num_inference_steps}")
 
-        # Generate latents
-        print("  [1/3] Generating latent representation...")
+        update_progress(0.15, "Generating latent representation...")
+
+        # Create a custom progress wrapper for the sampling
+        class ProgressWrapper:
+            def __init__(self, callback, total_steps):
+                self.callback = callback
+                self.total_steps = total_steps
+                self.current_step = 0
+
+            def __call__(self, *args, **kwargs):
+                self.current_step += 1
+                # Map steps 0-num_inference_steps to progress 0.15-0.75
+                progress = 0.15 + (0.60 * self.current_step / self.total_steps)
+                self.callback(progress, f"Diffusion step {self.current_step}/{self.total_steps}")
+
+        progress_wrapper = ProgressWrapper(update_progress, num_inference_steps)
+
+        # Generate latents with progress tracking
         latents = self.sample_latents(
             batch_size=1,
             model=self.text_model,
@@ -83,14 +106,12 @@ class ShapEModel(Model3DBase):
             s_churn=0,
         )
 
-        print("  [2/3] Decoding to mesh...")
+        update_progress(0.75, "Decoding to mesh...")
 
         # Get the mesh with higher resolution
         from shap_e.util.notebooks import decode_latent_mesh
 
-        # Try different resolutions to get better quality
         try:
-            # High resolution (slower but better)
             mesh = decode_latent_mesh(self.diffusion_model, latents[0]).tri_mesh()
             print(f"    ✓ Generated mesh with {len(mesh.verts)} vertices")
         except Exception as e:
@@ -104,11 +125,17 @@ class ShapEModel(Model3DBase):
 
         if bounds.min() < 0.01:
             print(f"    ⚠️  Warning: Mesh appears flat/degenerate!")
-            print(f"    Consider using a different prompt or higher guidance scale")
+            raise ValueError(
+                "Generated mesh is flat/invalid. Try:\n"
+                "  • More specific prompt (add details about shape/structure)\n"
+                "  • Higher guidance scale (try 20-25)\n"
+                "  • Different prompt entirely"
+            )
 
-        print("  [3/3] Converting to Gaussian splats...")
+        update_progress(0.90, "Converting to Gaussian splats...")
         self._export_to_ply(mesh, output_path)
 
+        update_progress(1.0, "Generation complete!")
         print(f"  ✓ Saved to {output_path}")
         return output_path
 
@@ -118,7 +145,7 @@ class ShapEModel(Model3DBase):
     def get_estimated_time(self, **kwargs) -> int:
         """Returns time in seconds"""
         num_steps = kwargs.get('num_inference_steps', 64)
-        return 30 + (num_steps * 0.5)  # ~30-60 seconds
+        return 30 + (num_steps * 0.5)
 
     def _export_to_ply(self, mesh, output_path):
         """Convert Shap-E mesh to PLY with proper Gaussian splat data"""
@@ -149,7 +176,7 @@ class ShapEModel(Model3DBase):
                 normals = mesh.vertex_normals
                 colors = (normals + 1.0) / 2.0
             else:
-                colors = np.random.rand(num_points, 3) * 0.5 + 0.5  # Random colors
+                colors = np.random.rand(num_points, 3) * 0.5 + 0.5
 
         colors = np.clip(colors, 0.0, 1.0)
         colors_uint8 = (colors * 255).astype(np.uint8)
@@ -164,32 +191,27 @@ class ShapEModel(Model3DBase):
         distances, _ = tree.query(vertices, k=k)
         avg_distances = distances[:, 1:].mean(axis=1)
 
-        # Much larger scales for visibility
         scales = np.zeros((num_points, 3), dtype=np.float32)
-        scales[:, 0] = avg_distances * 1.5  # Increased from 0.5
-        scales[:, 1] = avg_distances * 1.5  # Increased from 0.5
-        scales[:, 2] = avg_distances * 1.2  # Increased from 0.4
+        scales[:, 0] = avg_distances * 1.5
+        scales[:, 1] = avg_distances * 1.5
+        scales[:, 2] = avg_distances * 1.2
 
-        # More permissive clamping
-        scales = np.clip(scales, 0.01, 1.0)  # Larger max
-
+        scales = np.clip(scales, 0.01, 1.0)
         print(f"    Scale range: [{scales.min():.4f}, {scales.max():.4f}]")
 
         # === ROTATIONS ===
         rotations = np.zeros((num_points, 4), dtype=np.float32)
-        rotations[:, 0] = 1.0  # Identity quaternion (w=1, x=0, y=0, z=0)
+        rotations[:, 0] = 1.0
 
         # === OPACITY ===
         opacities = np.ones(num_points, dtype=np.float32) * 0.95
 
-        # === WRITE PLY (CAREFULLY) ===
+        # === WRITE PLY ===
         print(f"    Writing PLY to {output_path}...")
 
-        # Use struct to ensure correct binary layout
         import struct
 
         with open(output_path, 'wb') as f:
-            # ASCII header
             header = (
                 "ply\n"
                 "format binary_little_endian 1.0\n"
@@ -215,29 +237,16 @@ class ShapEModel(Model3DBase):
             )
             f.write(header.encode('ascii'))
 
-            # Binary data - write each vertex
             for i in range(num_points):
-                # Position (3 floats)
                 f.write(struct.pack('fff', vertices[i][0], vertices[i][1], vertices[i][2]))
-
-                # Normal (3 floats - placeholder)
                 f.write(struct.pack('fff', 0.0, 0.0, 0.0))
-
-                # Color (3 uint8)
                 f.write(struct.pack('BBB', colors_uint8[i][0], colors_uint8[i][1], colors_uint8[i][2]))
-
-                # Opacity (1 float)
                 f.write(struct.pack('f', opacities[i]))
-
-                # Scale (3 floats)
                 f.write(struct.pack('fff', scales[i][0], scales[i][1], scales[i][2]))
-
-                # Rotation (4 floats)
                 f.write(struct.pack('ffff', rotations[i][0], rotations[i][1], rotations[i][2], rotations[i][3]))
 
         print(f"    ✓ Successfully wrote {num_points} splats")
 
-        # Verify file was written
         file_size = output_path.stat().st_size
         expected_size = len(header.encode('ascii')) + (num_points * 59)
         print(f"    File size: {file_size} bytes (expected: {expected_size})")

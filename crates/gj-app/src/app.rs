@@ -47,6 +47,9 @@ impl ApplicationHandler<GjEvent> for App {
                     state.on_ui_event(e);
                 }
                 GjEvent::App(e) => {
+                    pollster::block_on(async {
+                        state.ui.on_app_event(e).await;
+                    });
                     self.needs_redraw = true;
                     state.window.request_redraw();
                 }
